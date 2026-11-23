@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.8.4-carmode"
+    static let version = "1.8.5-carmode"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -55,6 +55,9 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 #menuPanel .miTitle{font-size:14px;color:#8a8a90;margin:0 0 6px}
 #menuPanel .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:12px 0;font:inherit;font-size:17px;font-weight:600;color:#111;cursor:pointer}
 #menuPanel .miNote{margin:12px 0 0;font-size:13px;line-height:1.55;color:#6b6b70}
+/* 起始页（还没投屏时的"浏览器已接入"页）上的"菜单"：只改这颗按钮——
+   文字蓝色、底色和边框全透明、整体往下挪 2cm。二级面板完全不动。 */
+.onStart #menuBtn{top:calc(14px + 2cm);background:transparent;border:0;color:#0a84ff;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none}
 #top{position:fixed;z-index:3;left:16px;right:16px;top:14px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
 .badge{padding:9px 13px;border-radius:14px;background:rgba(18,24,36,.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font-size:14px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9f0a;margin-right:8px}.ok .dot{background:#30d158}.bad .dot{background:#ff453a}
 .toolbar{display:flex;flex-direction:column;align-items:flex-end;gap:8px}.actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.actions>*{white-space:nowrap}button,a.chip{pointer-events:auto;border:0;border-radius:13px;padding:9px 13px;background:rgba(18,24,36,.82);color:#fff;font:inherit;font-size:14px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer;text-decoration:none}
@@ -113,8 +116,8 @@ const soundCard=$('#soundCard'),soundBtn=$('#soundBtn'),soundClose=$('#soundClos
 let soundDismissed=false;
 function hideSoundCard(){if(soundCard)soundCard.hidden=true;soundDismissed=true}
 // 页面接入但还没画面时给出"开始投屏"，由车机这边发起 CarPlay 会话（和 CarMode 一致）。
-function showStartCard(){if(startCard&&!shown)startCard.hidden=false;showMenu()}
-function hideStartCard(){if(startCard)startCard.hidden=true}
+function showStartCard(){if(startCard&&!shown)startCard.hidden=false;document.body.classList.add('onStart');showMenu()}
+function hideStartCard(){if(startCard)startCard.hidden=true;document.body.classList.remove('onStart')}
 // 菜单按钮：页面一接上就出现（CarMode 那样，待机页也能点开）。
 const menuBtn=$('#menuBtn'),menuPanel=$('#menuPanel');
 function showMenu(){if(menuBtn)menuBtn.hidden=false}
