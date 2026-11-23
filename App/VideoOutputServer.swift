@@ -55,6 +55,8 @@ final class VideoOutputServer {
         var jpegFormatPending = false
         var wantsAudio = false
         var usesAudioClock = false
+        /// Last User-Agent reported by the page; used for diagnosing old head-unit browsers.
+        var userAgent: String?
         let secure: Bool
         init(connection: NWConnection, secure: Bool) {
             self.connection = connection; self.secure = secure
@@ -426,6 +428,10 @@ final class VideoOutputServer {
             let wantsJPEG = decoder == "jpeg"
             if webCodecs != client.webCodecs || !client.streamStarted {
                 onLog?("\(client.peer) 使用\(wantsJPEG ? " JPEG 兼容" : webCodecs ? " WebCodecs 低延迟" : " MSE 兼容")解码")
+            }
+            if let ua = object["ua"] as? String, !ua.isEmpty, ua != client.userAgent {
+                client.userAgent = ua
+                onLog?("\(client.peer) 浏览器标识：\(ua)")
             }
             client.webCodecs = webCodecs
             client.usesAudioClock = browserAudio && object["audioClock"] as? Bool == true
