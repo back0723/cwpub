@@ -1,0 +1,31 @@
+name: build-unsigned-ipa
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成工程
+        run: python3 Tools/generate_project.py
+
+      - name: 编译（不签名）
+        run: |
+          xcodebuild -project TDSCarKit.xcodeproj -scheme TDSCarKit -sdk iphoneos \
+            -configuration Release -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" build
+
+      - name: 打包 IPA
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Build/Products/Release-iphoneos/TDSCarKit.app out/Payload/
+          cd out && zip -qry CarWithin-JPEG-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CarWithin-JPEG-unsigned-ipa
+          path: out/CarWithin-JPEG-unsigned.ipa
