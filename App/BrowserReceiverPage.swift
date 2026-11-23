@@ -74,8 +74,6 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
     <button class="mi" id="miDisconnect">断开本浏览器</button>
     <p class="miNote">点击开启网页声音。要改用手机扬声器，请在 iPhone 控制中心选择 iPhone。</p>
   </div>
-  <div class="actions"><a id="fast" class="chip" hidden>配置 HTTPS</a><button id="statsButton">统计</button><button id="full">全屏</button></div>
-  <button id="enableAudio" hidden>开启声音</button>
 </div></div>
 <div id="stats" class="badge" hidden></div>
 <div id="startCard" hidden><h1>浏览器已接入</h1><p>可在手机或浏览器开始连接。</p><button id="startBtn">开始投屏</button></div>
@@ -101,8 +99,7 @@ const $=s=>document.querySelector(s);
 const video=$('#video'),view=$('#view'),hold=$('#hold'),touchLayer=$('#touch'),statusEl=$('#status'),label=statusEl.querySelector('span:last-child'),statsEl=$('#stats'),fastLink=$('#fast');
 const MS=(/iPhone|iPad|iPod/.test(navigator.userAgent)&&window.ManagedMediaSource)||window.MediaSource||window.ManagedMediaSource;
 const managedMSE=!!MS&&MS===window.ManagedMediaSource;
-const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');
-const startCard=$('#startCard'),startBtn=$('#startBtn');
+const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');const startCard=$('#startCard'),startBtn=$('#startBtn');
 const soundCard=$('#soundCard'),soundBtn=$('#soundBtn'),soundClose=$('#soundClose');
 let soundDismissed=false;
 function hideSoundCard(){if(soundCard)soundCard.hidden=true;soundDismissed=true}
@@ -245,7 +242,7 @@ function audioStateChanged(){
  clearTimeout(audioGestureTimer);audioGestureTimer=0;
  requestAudio();
  const want=canStartAudio()&&!audioPlaying();
- enableAudio.hidden=!want;
+ if(enableAudio)enableAudio.hidden=!want;
  if(soundCard)soundCard.hidden=!want||soundDismissed;
  const item=$('#miAudio');
  if(item)item.textContent=audioPlaying()?'在车机播放声音 · 已开启':'在车机播放声音';
@@ -268,7 +265,7 @@ function ensureAudioPlayback(fromGesture){
   audioOffered=false;audioStateChanged();
  }
 }
-enableAudio.onclick=()=>ensureAudioPlayback(true);
+if(enableAudio)enableAudio.onclick=()=>ensureAudioPlayback(true);
 function packetTimestamp(u){
  const time=new DataView(u.buffer,u.byteOffset+1,8);
  return time.getUint32(0)*4294967296+time.getUint32(4);
@@ -435,7 +432,7 @@ function onText(m){
   if(PERF[m.perf]){perfMode=m.perf;P=PERF[m.perf]}
   showTouches=!!m.showTouches;audioOffered=!!m.audio;ensureAudioPlayback();
   // Plain HTTP cannot run WebCodecs; offer the HTTPS page when CarWithin serves one.
-  if(!canWebCodecs&&location.protocol==='http:'&&m.securePort>0){fastLink.href='/https-setup';fastLink.hidden=false}
+  if(fastLink&&!canWebCodecs&&location.protocol==='http:'&&m.securePort>0){fastLink.href='/https-setup';fastLink.hidden=false}
   return}
  if(m.type==='pong'){
   if(typeof m.t0!=='number')return;
@@ -755,12 +752,12 @@ document.addEventListener('visibilitychange',()=>{
  if(document.hidden&&fingers.size){fingers.forEach(f=>{if(f.dot)f.dot.remove()});fingers.clear();send({type:'touches',points:[]})}
  if(!document.hidden&&useWebCodecs&&decoder){wcWaiting=true;askKey('页面回到前台')}
 });
-$('#full').onclick=()=>{const d=document.documentElement;(d.requestFullscreen||d.webkitRequestFullscreen||(()=>{})).call(d)};
+if($('#full'))$('#full').onclick=()=>{const d=document.documentElement;(d.requestFullscreen||d.webkitRequestFullscreen||(()=>{})).call(d)};
 function isFullscreen(){return !!(document.fullscreenElement||document.webkitFullscreenElement)}
 function fullscreenChanged(){document.body.classList.toggle('fullscreen',isFullscreen());wake()}
 document.addEventListener('fullscreenchange',fullscreenChanged);
 document.addEventListener('webkitfullscreenchange',fullscreenChanged);
-$('#statsButton').onclick=()=>{statsEl.hidden=!statsEl.hidden;preference('localStorage','carplays.stats',statsEl.hidden?'0':'1')};
+if($('#statsButton'))$('#statsButton').onclick=()=>{statsEl.hidden=!statsEl.hidden;preference('localStorage','carplays.stats',statsEl.hidden?'0':'1')};
 if(preference('localStorage','carplays.stats')==='1'||debug)statsEl.hidden=false;
 if(!canWebCodecs&&location.protocol==='https:')report('info','HTTPS 页面但浏览器没有 WebCodecs，使用 MSE');
 
