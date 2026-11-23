@@ -32,6 +32,7 @@ final class SameDeviceProbe {
             // Use transport type 2 for a Wi-Fi accessory connection.
             try transport.start(withIdentifier: configuration.deviceID, transportType: 2)
             stage("已创建本机配件端点（传输类型 2），正在建立 iAP2")
+            onLog?("CarPlay 启动参数：\(configuration.address):\(configuration.port)，Wi-Fi 组 SSID \(configuration.ssid.isEmpty ? "（空）" : "“\(configuration.ssid)”")")
             try transport.send(IAP2Packet.presence)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 guard let self, self.active, self.generation == run else { return }
@@ -61,10 +62,16 @@ final class SameDeviceProbe {
         controlConnected = true
         stage("CarPlay 控制连接已建立，正在协商会话")
     }
-    private func requestSession(_ configuration: ReceiverConfiguration) throws {
-        let wifi = try AccessoryMessages.WiFi(ssid: configuration.ssid, password: configuration.password, channel: configuration.wifiChannel)
+    private func requestSession(_ configuration: ReceiverConfiguration, wireless: Bool = true) throws {
+        // iOS 16 sometimes refuses the Wi-Fi group (wrong SSID/channel makes it try to switch
+        // networks and drop the request). Same-device installs are already on the LAN, so the
+        // plain address form is tried as well.
+        let wifi = wireless
+            ? try AccessoryMessages.WiFi(ssid: configuration.ssid, password: configuration.password, channel: configuration.wifiChannel)
+            : nil
         try send(AccessoryMessages.startSession(address: configuration.address, port: configuration.port,
             deviceID: configuration.deviceID, wifi: wifi))
+        stage("已请求在 \(configuration.address):\(configuration.port) 启动 CarPlay（\(wireless ? "含 Wi-Fi 参数" : "仅地址" )），会话正在等待 TCP 连接")
     }
     private func stage(_ message: String) { onLog?(message); onStage?(message) }
     private func finish(_ message: String) { onLog?(message); stop(); onFinished?(message) }
@@ -136,13 +143,15 @@ final class SameDeviceProbe {
                 }
             }
             if controlConnected || (!expectsLocalControl && requested) { return }
-            try requestSession(configuration)
+            try requestSession(configuration, wireless: false)
             if !requested && expectsLocalControl {
                 let run = generation
-                for delay in [3.0, 6.0, 9.0] {
+                // Alternate both forms: iOS 16 accepts whichever matches its Wi-Fi state.
+                let plans: [(Double, Bool)] = [(3.0, true), (6.0, false), (9.0, true), (12.0, false)]
+                for (delay, wireless) in plans {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self, self.active, self.generation == run, !self.controlConnected else { return }
-                        do { try self.requestSession(configuration) }
+                        do { try self.requestSession(configuration, wireless: wireless) }
                         catch { self.finish("会话重试失败：\(error)") }
                     }
                 }
