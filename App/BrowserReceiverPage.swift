@@ -48,8 +48,20 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 #soundCard p{margin:0;font-size:15px;line-height:1.4;color:#c7d2e0}
 #soundCard button{border:0;border-radius:12px;padding:10px 18px;background:#0a84ff;color:#fff;font-size:16px;cursor:pointer;white-space:nowrap}
 #soundCard .sClose{padding:9px 14px;background:rgba(255,255,255,.14);font-size:14px}
+/* 返回键/后退按钮走到最后一步时弹的确认框：取消留着，确认才真的退出投屏界面。 */
+#exitCard{position:fixed;z-index:9;left:50%;top:50%;transform:translate(-50%,-50%);min-width:300px;max-width:calc(100vw - 40px);padding:22px 24px;border-radius:18px;background:rgba(16,22,32,.96);color:#fff;text-align:center;box-shadow:0 18px 50px rgba(0,0,0,.65)}
+#exitCard p{margin:0 0 6px;font-size:18px;font-weight:600}
+#exitCard .exNote{margin:0 0 18px;font-size:14px;font-weight:400;color:#9aa7b8}
+#exitCard .exRow{display:flex;gap:12px;justify-content:center}
+#exitCancel{border:0;border-radius:12px;padding:11px 26px;font-size:16px;cursor:pointer;background:rgba(255,255,255,.16);color:#fff}
+#exitConfirm{border:0;border-radius:12px;padding:11px 26px;font-size:16px;cursor:pointer;background:#0a84ff;color:#fff}
+.exited main,.exited #top,.exited #stats,.exited #touch,.exited #soundCard{display:none}
+#exitedNote{position:fixed;z-index:10;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;color:#8b9bb4;font-size:16px;display:none}
+.exited #exitedNote{display:block}
 /* CarMode 的右上角"菜单"：点开是一个白色二级面板（进入全屏 / 在车机播放声音 / 画面适应 / 断开本浏览器）。 */
-#menuBtn{position:fixed;z-index:8;right:16px;top:14px;padding:10px 18px;border:1px solid rgba(255,255,255,.16);border-radius:12px;background:rgba(20,26,38,.9);color:#fff;font-size:16px;cursor:pointer;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+/* 起始页的"菜单"：文字蓝色、按钮和边框全透明，位置比原来下移 2cm（CSS 1cm = 37.8px，共约 76px）。 */
+#menuBtn{position:fixed;z-index:8;right:16px;top:90px;padding:10px 18px;border:0;border-radius:12px;background:none;background-color:transparent;box-shadow:none;color:#0a84ff;font-size:16px;cursor:pointer;backdrop-filter:none;-webkit-backdrop-filter:none}
+#menuBtn:active{background:none}
 /* max()/env() 在 Chromium 53 也是无效值，会整条声明被丢掉，所以这里只用普通像素值。 */
 #menuPanel{position:fixed;z-index:8;right:16px;top:66px;width:320px;max-width:calc(100vw - 32px);padding:18px 22px;border-radius:18px;background:#fff;color:#111;text-align:left;box-shadow:0 16px 48px rgba(0,0,0,.5)}
 #menuPanel .miTitle{font-size:14px;color:#8a8a90;margin:0 0 6px}
@@ -91,6 +103,8 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 <div id="startCard" hidden><h1>浏览器已接入</h1><p>可在手机或浏览器开始连接。</p><button id="startBtn">开始投屏</button></div>
 <div id="soundCard" hidden><h1>声音还没开</h1><p>点“开启声音”，CarPlay 的声音就从车机喇叭播放。</p><button id="soundBtn">开启声音</button><button id="soundClose" class="sClose">暂不</button></div>
 <button id="startPlayback" hidden>开始播放</button>
+<div id="exitCard" hidden><p>退出投屏？</p><p class="exNote">确认后断开画面和声音，退出投屏界面。</p><div class="exRow"><button id="exitCancel">取消</button><button id="exitConfirm">确认</button></div></div>
+<div id="exitedNote">已退出投屏，刷新页面可重新连接</div>
 <script>
 /* This early check uses ES5 so even a restricted WebView can explain why playback cannot start. */
 (function () {
@@ -772,7 +786,7 @@ function liftPoint(key){const f=fingers.get(key);if(!f)return;if(f.dot)f.dot.rem
 // 车机是 Crosswalk 23 / Chromium 53：没有 Pointer Events，而且触摸层在老浏览器上曾经因为没有宽高
 // 变成 0×0。这里不再依赖任何图层的尺寸，直接在 document 上抓手指：
 // 只要落点不是页面自己的按钮/菜单，就一律转发成 CarPlay 的触摸（CarMode 就是这么点的）。
-const CONTROL_SEL='button,#menuBtn,#menuPanel,#soundCard,#startCard,a.chip';
+const CONTROL_SEL='button,#menuBtn,#menuPanel,#soundCard,#startCard,#exitCard,a.chip';
 function onControlAt(cx,cy){
  let el=null;
  try{el=document.elementFromPoint(cx,cy)}catch(e){}
@@ -859,14 +873,33 @@ function fullscreenChanged(){
 }
 document.addEventListener('fullscreenchange',fullscreenChanged);
 document.addEventListener('webkitfullscreenchange',fullscreenChanged);
-// 车机的物理返回键在网页里就是 history 后退。先压一个哨兵条目，把返回键吃掉：
-// 全屏时按返回 = 退出全屏，非全屏按返回也留在本页，不会把浏览器画面退崩。
-let backGuard=false;
+// 车机的物理返回键 / 浏览器的后退按钮，在网页里都表现为 history 后退。
+// 压一个哨兵条目把后退吃掉：全屏时先退全屏；已经到最后一步则弹"确认/取消"，
+// 只有点确认才断开投屏并退出界面（取消就继续看）。
+let backGuard=false,leaving=false;
 function armBackGuard(){if(backGuard)return;backGuard=true;try{history.pushState({cwBack:1},'')}catch(e){}}
+function askExit(){const c=$('#exitCard');if(c)c.hidden=false;wake()}
+function finishExit(){
+ leaving=true;manualStop=true;
+ try{ws.close()}catch(e){}
+ const c=$('#exitCard');if(c)c.hidden=true;
+ if(fingers.size){fingers.forEach(f=>{if(f.dot)f.dot.remove()});fingers.clear()}
+ clearAudio();
+ document.body.classList.add('exited');
+ try{history.replaceState({},'')}catch(e){}
+}
 window.addEventListener('popstate',function(){
+ if(leaving)return;
+ if(isFullscreen()||pseudoFull()){
+  exitFullscreenNow();
+  try{history.pushState({cwBack:1},'')}catch(e){}
+  return;
+ }
  try{history.pushState({cwBack:1},'')}catch(e){}
- if(isFullscreen()||pseudoFull())exitFullscreenNow();
+ askExit();
 });
+if($('#exitCancel'))$('#exitCancel').onclick=function(){const c=$('#exitCard');if(c)c.hidden=true};
+if($('#exitConfirm'))$('#exitConfirm').onclick=finishExit;
 armBackGuard();
 // 用户要求：车机屏幕上不要挂那坨黑色统计（HTTP/JPEG、fps、音频缓冲…）。
 // 永久隐藏，同时把之前存在 localStorage 里的开关也清掉，免得升级后又被打开。
