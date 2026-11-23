@@ -43,6 +43,8 @@ final class NativeReceiver {
     private var touchSlots = TouchSlots(count: CarPlayInfo.touchContacts)
     private var displaySize: (width: Int, height: Int)?
     private var nightMode: Bool?
+    /// 主线程：最近一次车机网页上报的真实视口（工具栏收起后的全屏尺寸）。
+    private var headUnitScreen: BrowserDisplay?
     private var generation = UUID()
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
@@ -89,7 +91,11 @@ final class NativeReceiver {
             self.videoOutput.onTouches = { [weak self] source, points in self?.touches(source: source, points) }
             self.videoOutput.onControl = { [weak self] in self?.press($0) }
             self.videoOutput.onDisplay = { [weak self] display, viewerID in
-                DispatchQueue.main.async { self?.onBrowserDisplay?(display, viewerID) }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    if let display, display.height >= 500 { self.headUnitScreen = display }
+                    self.onBrowserDisplay?(display, viewerID)
+                }
             }
             self.videoOutput.onStruggling = { [weak self] peer, reason in DispatchQueue.main.async { self?.onBrowserStruggling?(peer, reason) } }
             if let target = configuration.zeehoAddress {
@@ -157,8 +163,48 @@ final class NativeReceiver {
                 } catch { self.fail("无线音频编解码器不可用：\(error.localizedDescription)"); return }
             }
             self.log("请求 \(configuration.width)×\(configuration.height) @ \(configuration.maxFPS) FPS，\(configuration.videoCodec.displayName)；音频\(configuration.audioEnabled ? "已启用（PCM/AAC/Opus）" : "已关闭")")
-            self.listen(configuration: configuration, identity: identity, port: configuration.port, onReady: listening)
+            self.startSessionAfterHeadUnitScreen(configuration: configuration, identity: identity, onReady: listening)
         }
+    }
+    /// CarMode 的顺序：车机网页先接入并上报全屏尺寸，之后才建 CarPlay 会话。
+    /// iPhone 从 /info 里读配件屏幕尺寸，再决定要不要建 110 主屏视频流。我们之前用
+    /// 1922×320（宽高比 6:1 的占位值）开局，iPhone 只回 RECORD、从不发视频，车机就一直停在
+    /// "正在准备兼容画面"。这里等到网页上报 ≥500 高的真实尺寸，再用它建会话。
+    private func startSessionAfterHeadUnitScreen(configuration: ReceiverConfiguration, identity: AccessoryIdentity,
+                                                onReady: ((UInt16) -> Void)?) {
+        guard configuration.videoOutputPort != nil else {
+            listen(configuration: configuration, identity: identity, port: configuration.port, onReady: onReady)
+            return
+        }
+        let generation = self.generation
+        let deadline = Date().addingTimeInterval(25)
+        self.log("等待车机网页上报全屏尺寸后再建立 CarPlay 会话（最多 25 秒；车机先打开接收页会更快）")
+        func attempt() {
+            guard self.generation == generation else { return }
+            let reported = self.headUnitScreen
+            if let reported, reported.height >= 500 {
+                var updated = configuration
+                updated.width = reported.width; updated.height = reported.height
+                self.queue.async { [weak self] in
+                    guard let self, self.generation == generation else { return }
+                    self.displaySize = (updated.width, updated.height)
+                    self.log("车机网页已上报 \(reported.width)×\(reported.height)，开始建立 CarPlay 会话")
+                    self.listen(configuration: updated, identity: identity, port: updated.port, onReady: onReady)
+                }
+                return
+            }
+            guard Date() < deadline else {
+                self.log("未等到车机网页上报尺寸，按 \(configuration.width)×\(configuration.height) 直接建会话")
+                self.queue.async { [weak self] in
+                    guard let self, self.generation == generation else { return }
+                    self.listen(configuration: configuration, identity: identity, port: configuration.port, onReady: onReady)
+                }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { attempt() }
+        }
+        // headUnitScreen 只在主线程写入，轮询也放主线程，避免跨队列读取。
+        DispatchQueue.main.async { attempt() }
     }
     private func listen(configuration: ReceiverConfiguration, identity: AccessoryIdentity, port: UInt16?, onReady: ((UInt16) -> Void)?) {
         let generation = self.generation

@@ -30,11 +30,13 @@ enum CarScreenStore {
         return list.sorted { $0.lastUsed > $1.lastUsed }
     }
 
-    /// The screen the user ticked, else the most recently used one.
+    /// The screen the user ticked, else the largest recently used one. 车机网页偶尔会先报一个
+    /// 1922×217 的临时视口（工具栏未收起），按面积挑最大的就能避开它。
     static func preferred() -> CarScreen? {
         let list = screens()
-        if let key = UserDefaults.standard.string(forKey: defaultKey), let chosen = list.first(where: { $0.key == key }) { return chosen }
-        return list.first
+        if let key = UserDefaults.standard.string(forKey: defaultKey), let chosen = list.first(where: { $0.key == key }),
+           chosen.height >= 500 { return chosen }
+        return list.max { ($0.width * $0.height) < ($1.width * $1.height) } ?? list.first
     }
 
     static var defaultKeyValue: String? { UserDefaults.standard.string(forKey: defaultKey) }

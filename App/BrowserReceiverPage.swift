@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.2.0-jpeg"
+    static let version = "1.3.0-carmode"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">

@@ -81,6 +81,7 @@ final class CarPlayMediaSession {
                 listener.onConnection = { [weak self] connection in
                     guard let self, self.video == nil else { connection.stop(); return }
                     self.video = connection; self.onLog?("视频 TCP 通道已连接")
+                    self.flushNightMode()
                     connection.onBytes = { [weak self] bytes in
                         guard let self, let screen = self.screen else { return }
                         do {
@@ -127,16 +128,11 @@ final class CarPlayMediaSession {
         return try PropertyListSerialization.data(fromPropertyList: response, format: .binary, options: 0)
     }
 
-    /// Features the accessory is willing to enable. Only asking for the screen stream depends on
-    /// `mainBuffered`; `viewAreas` keeps the phone's own layout hints.
+    /// Features the accessory enables. 能出画面的 CarMode 只认 `viewAreas`；额外回
+    /// `mainBuffered` 反而让 iOS 16 在 RECORD 后直接断开，连 streams SETUP 都不发。
     private func enabledFeatures(proposed: [String]?) -> [String] {
-        var features = ["mainBuffered", "viewAreas"]
-        if hevc { features.append("hevc") }
-        // Keep anything the phone itself proposed that we can honour without changing framing.
-        for value in ["uiContext", "cornerMasks", "focusTransfer"] where proposed?.contains(value) == true {
-            features.append(value)
-        }
-        return features
+        _ = proposed
+        return hevc ? ["viewAreas", "hevc"] : ["viewAreas"]
     }
     private func acceptEvent(_ connection: MediaTCPConnection) {
         guard event == nil else { connection.stop(); return }
@@ -157,7 +153,8 @@ final class CarPlayMediaSession {
         }
         connection.onClose = { [weak self] in self?.event = nil; self?.eventCipher = nil; self?.onLog?("事件通道已关闭") }
         connection.start()
-        flushNightMode()
+        // 这里不能立刻发 setNightMode：iOS 16 在视频流起来之前会用 408 拒掉，几秒后把整条控制
+        // 连接 TEARDOWN 掉，于是永远等不到 streams SETUP。CarMode 全程不发命令正是这个原因。
     }
     var hasEventChannel: Bool { event != nil && eventCipher != nil }
     /// Full multitouch state: every slot is reported each time; missing slots report up.
@@ -183,11 +180,21 @@ final class CarPlayMediaSession {
     }
     private func flushNightMode() {
         guard let night = pendingNightMode, hasEventChannel else { return }
+        // 视频流没起来之前发命令会被 408 拒掉并连带 TEARDOWN，所以等画面通道就绪再发。
+        guard video != nil else {
+            if !deferredNightModeLogged {
+                deferredNightModeLogged = true
+                onLog?("外观命令暂缓：等视频流就绪后再通知 iPhone")
+            }
+            return
+        }
         if sendCommand(["type": "setNightMode", "params": ["nightMode": night]], label: "夜间模式") {
             pendingNightMode = nil
+            deferredNightModeLogged = false
             onLog?("已通知 iPhone 切换为\(night ? "夜间" : "白天")外观")
         }
     }
+    private var deferredNightModeLogged = false
     private func sendHID(_ uuid: String, _ report: Data, label: String) -> Bool {
         sendCommand(["type": "hidSendReport", "uuid": uuid, "hidReport": report], label: label)
     }

@@ -1704,6 +1704,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
 
     private func browserReportedDisplay(_ display: BrowserDisplay?, viewerID: UUID?) {
         guard running else { return }
+        // 车机页面在工具栏收起前会先报 1922×217 这种矮视口，随后才是真正的全屏尺寸。把它当成
+        // "新车机屏幕"会改写随后的会话参数，CarMode 只在参数不变的前提下出画面。
+        if let display, display.height < 500, reportedScreen != nil || CarScreenStore.preferred() != nil {
+            log("忽略车机上报的临时视口 \(display.width)×\(display.height)")
+            return
+        }
         reportedScreen = display.map(CarScreenStore.record)
         primaryViewer = viewerID
         refreshScreenMenu()
@@ -1732,7 +1738,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         if wanted.codec != live.codec { changes.append("\(live.codec.displayName) → \(wanted.codec.displayName)") }
         if wanted.iconWidthMM != live.iconWidthMM { changes.append("图标大小") }
         guard !changes.isEmpty else { return }
-        restartCarPlay(reason: "跟随主接收屏幕（\(changes.joined(separator: "，"))）")
+        // 会话中途重启会让 iPhone 立刻 TEARDOWN，视频流永远起不来（CarMode 全程不重启）。
+        log("画面参数变化：\(changes.joined(separator: "，"))（本次会话不重启，下次启动生效）")
     }
     private func browserStruggling(peer: String, reason: String) {
         log("浏览器 \(peer) 持续卡顿（\(reason)）")
