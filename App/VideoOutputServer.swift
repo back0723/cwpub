@@ -123,7 +123,9 @@ final class VideoOutputServer {
     private var hls: CarPlayHLS?
     /// Decodes H.264/H.265 into standalone JPEGs for old browsers that cannot survive without
     /// repeated IDR keyframes (Chromium 53 head units). Shared by all JPEG viewers.
-    private let jpegEncoder = BrowserJPEGEncoder()
+    // 车机是 1GB RAM 的安卓 4.2：每帧 JPEG 的尺寸和帧率直接决定它卡不卡。
+    // 30fps 原尺寸它扛不住，这里降到 15fps + 1280 宽上限（页面 canvas 再放大到满屏）。
+    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.45, maximumFPS: 15)
     var onAirPlayReady: ((UUID) -> Void)?
 
     private var viewerCount: Int { clients.values.filter { $0.mode != .request }.count }

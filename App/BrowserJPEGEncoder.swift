@@ -35,6 +35,9 @@ final class BrowserJPEGEncoder {
     private let quality: NSNumber
     /// Emit at most this many JPEG frames per second. 0 means uncapped.
     private let maximumFPS: Int
+    /// Downscale anything wider than this before encoding. Old head units decode a 1436×640
+    /// JPEG per frame slowly; 1280 keeps the picture usable with a much cheaper decode.
+    private let maximumWidth: CGFloat
     private var lastEmitUs: UInt64 = 0
 
     /// Called on `queue` with a complete JPEG (no leading opcode). The server adds its own header.
@@ -48,9 +51,10 @@ final class BrowserJPEGEncoder {
         box.output?(imageBuffer)
     }
 
-    init(quality: Float = 0.55, maximumFPS: Int = 20) {
+    init(quality: Float = 0.55, maximumFPS: Int = 20, maximumWidth: CGFloat = 1280) {
         self.quality = NSNumber(value: Double(min(max(quality, 0.1), 1.0)))
         self.maximumFPS = maximumFPS
+        self.maximumWidth = maximumWidth
     }
 
     deinit {
@@ -228,7 +232,12 @@ final class BrowserJPEGEncoder {
             guard now - lastEmitUs >= minimumInterval else { return }
             lastEmitUs = now
         }
-        let image = CIImage(cvPixelBuffer: buffer)
+        var image = CIImage(cvPixelBuffer: buffer)
+        let width = image.extent.width
+        if maximumWidth > 0, width > maximumWidth {
+            let scale = maximumWidth / width
+            image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
         let options: [CIImageRepresentationOption: Any] = [
             CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality
         ]

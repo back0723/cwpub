@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.8.1-carmode"
+    static let version = "1.8.2-carmode"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -135,16 +135,7 @@ if(menuBtn){
  });
  $('#miFull').onclick=function(){
   menuPanel.hidden=true;
-  const d=document.documentElement;
-  try{
-   if(isFullscreen()){
-    const exit=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen;
-    if(exit)exit.call(document);
-   }else{
-    const enter=d.requestFullscreen||d.webkitRequestFullscreen||d.msRequestFullscreen;
-    if(enter)enter.call(d);
-   }
-  }catch(e){}
+  toggleFullscreen();
  };
  $('#miAudio').onclick=function(){
   menuPanel.hidden=true;
@@ -834,15 +825,49 @@ document.addEventListener('visibilitychange',()=>{
  if(document.hidden&&fingers.size){fingers.forEach(f=>{if(f.dot)f.dot.remove()});fingers.clear();send({type:'touches',points:[]})}
  if(!document.hidden&&useWebCodecs&&decoder){wcWaiting=true;askKey('页面回到前台')}
 });
-if($('#full'))$('#full').onclick=()=>{const d=document.documentElement;(d.requestFullscreen||d.webkitRequestFullscreen||(()=>{})).call(d)};
+if($('#full'))$('#full').onclick=()=>toggleFullscreen();
 function isFullscreen(){return !!(document.fullscreenElement||document.webkitFullscreenElement)}
+function pseudoFull(){return document.body.classList.contains('pseudoFull')}
+function setPseudoFull(on){document.body.classList.toggle('pseudoFull',on);document.body.classList.toggle('fullscreen',on||isFullscreen())}
+function enterFullscreen(){
+ armBackGuard();
+ const d=document.documentElement;
+ try{
+  const fn=d.requestFullscreen||d.webkitRequestFullscreen||d.mozRequestFullScreen||d.msRequestFullscreen;
+  if(fn)fn.call(d);
+ }catch(e){}
+ // Crosswalk 23 常常不实现 Fullscreen API（请求了也没反应）。600ms 内没进全屏就退回
+ // "整页铺满"模式，至少让菜单里的"退出全屏"和车机返回键都有确定的行为。
+ window.setTimeout(function(){if(!isFullscreen()&&!document.hidden)setPseudoFull(true)},600);
+}
+function exitFullscreenNow(){
+ try{
+  const fn=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen;
+  if(fn)fn.call(document);
+ }catch(e){}
+ if(pseudoFull())setPseudoFull(false);
+}
+function toggleFullscreen(){
+ if(isFullscreen()||pseudoFull())exitFullscreenNow();else enterFullscreen();
+}
 function fullscreenChanged(){
- document.body.classList.toggle('fullscreen',isFullscreen());
- const item=$('#miFull');if(item)item.textContent=isFullscreen()?'退出全屏':'进入全屏';
- wake();sendDisplay();
+ const on=isFullscreen()||pseudoFull();
+ document.body.classList.toggle('fullscreen',on);
+ const item=$('#miFull');if(item)item.textContent=on?'退出全屏':'进入全屏';
+ wake();
+ // 全屏切换不再上报窗口尺寸：那会让 CarPlay 按新尺寸重连，退出全屏时画面会黑一下。
 }
 document.addEventListener('fullscreenchange',fullscreenChanged);
 document.addEventListener('webkitfullscreenchange',fullscreenChanged);
+// 车机的物理返回键在网页里就是 history 后退。先压一个哨兵条目，把返回键吃掉：
+// 全屏时按返回 = 退出全屏，非全屏按返回也留在本页，不会把浏览器画面退崩。
+let backGuard=false;
+function armBackGuard(){if(backGuard)return;backGuard=true;try{history.pushState({cwBack:1},'')}catch(e){}}
+window.addEventListener('popstate',function(){
+ try{history.pushState({cwBack:1},'')}catch(e){}
+ if(isFullscreen()||pseudoFull())exitFullscreenNow();
+});
+armBackGuard();
 if($('#statsButton'))$('#statsButton').onclick=()=>{statsEl.hidden=!statsEl.hidden;preference('localStorage','carplays.stats',statsEl.hidden?'0':'1')};
 if(preference('localStorage','carplays.stats')==='1'||debug)statsEl.hidden=false;
 if(!canWebCodecs&&location.protocol==='https:')report('info','HTTPS 页面但浏览器没有 WebCodecs，使用 MSE');
