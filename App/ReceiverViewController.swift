@@ -64,7 +64,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     /// 资源就不再发 SETUP(streams)，所以浏览器输出这条路即便声音选"手机"也必须声明音频能力，
     /// 否则 iPhone 不回第二条带 streams 的 SETUP，车机永远等不到画面。声音仍按"声音输出"走。
     private var declaresAudio: Bool {
-        outputMode == .browser ? true : (soundOutput != .phone)
+        // CarLife 这条路和浏览器一样必须声明音频能力：`soundOutput` 在 CarLife 模式下恒为
+        // .phone（声音不上车机），以前因此没有音频位，日志显示“音频已关闭”，iPhone 就只回
+        // 资源通知、不发第二条带 streams 的 SETUP，车机永远“等待关键帧”。声音路由不受影响。
+        if outputMode == .browser || outputMode == .carLife { return true }
+        return soundOutput != .phone
     }
     private let videoOutputPortField = UITextField()
     private let secureVideoOutputPortField = UITextField()
