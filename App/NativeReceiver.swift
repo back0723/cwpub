@@ -552,7 +552,8 @@ final class NativeReceiver {
                             self.carLifeGOP.append(data); self.carLifeGOPBytes += data.count
                         }
                         if self.carLifeParamSets.count < 2, let units = try? AnnexB.units(in: data) {
-                            let sets = units.compactMap { codec.parameterSet($0) }
+                            // 缓存原始 NAL 单元（SPS/PPS），会话重建后参数集丢失时用它补回来。
+                            let sets = units.filter { codec.parameterSet($0) != nil }
                             if sets.count >= 2 { self.carLifeParamSets = sets }
                         }
                         self.carLife.append(data, codec: codec)
