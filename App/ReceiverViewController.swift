@@ -528,6 +528,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         ])
         receiver.onLog = { [weak self] in self?.log($0) }; bluetooth.onLog = { [weak self] in self?.log($0) }
         receiver.onControlConnected = { [weak self] in self?.sameDevice.didConnectControl() }
+        receiver.onControlDisconnected = { [weak self] in self?.sameDevice.didDisconnectControl() }
         receiver.onVideo = { [weak self] data, codec in
             guard let self, self.running else { return }
             // Nothing local is visible in the background without PiP: save the decoding work.
