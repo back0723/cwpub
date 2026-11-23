@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.8.0-carmode"
+    static let version = "1.8.1-carmode"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -31,30 +31,34 @@ enum BrowserReceiverPage {
 <title>CarWithin</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#05070b;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
-main{position:relative;width:100%;height:100%}video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
-#touch{position:absolute;inset:0;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+main{position:relative;width:100%;height:100%}video,canvas{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
+/* 车机是 Chromium 53：inset:0 要 Chrome 87 才支持，写了等于没写 → #touch 没有宽高、变成 0×0，
+   手指全落在它外面，页面一辈子收不到 touchstart，这就是"车机上完全点不动"的真因。
+   一律改成 left/top/right/bottom + width/height。 */
+#touch{position:fixed;left:0;top:0;right:0;bottom:0;width:100%;height:100%;z-index:2;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 #startPlayback{position:fixed;z-index:5;top:50%;left:50%;transform:translate(-50%,-50%);background:#0a84ff;font-size:17px;padding:12px 20px}
 /* CarMode 那种入口：页面先接入，屏幕上给一个"开始投屏"按钮，点了才发起 CarPlay 会话。 */
-#startCard{position:fixed;z-index:6;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0d1626;color:#fff;text-align:center;padding:24px}
+#startCard{position:fixed;z-index:6;left:0;top:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0d1626;color:#fff;text-align:center;padding:24px}
 #startCard h1{margin:0;font-size:34px;font-weight:600}
 #startCard p{margin:0;font-size:16px;color:#8b9bb4}
 #startCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
 /* 出画后如果网页拿不到播放权限，就给一条"开启声音"提示；不做全屏遮罩，免得挡住车机上的操作。 */
-#soundCard{position:fixed;z-index:7;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));transform:translateX(-50%);display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 16px;border-radius:16px;background:rgba(12,18,28,.94);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.5);max-width:calc(100vw - 40px)}
+#soundCard{position:fixed;z-index:7;left:50%;bottom:28px;transform:translateX(-50%);display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 16px;border-radius:16px;background:rgba(12,18,28,.94);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.5);max-width:calc(100vw - 40px)}
 #soundCard h1{display:none}
 #soundCard p{margin:0;font-size:15px;line-height:1.4;color:#c7d2e0}
 #soundCard button{border:0;border-radius:12px;padding:10px 18px;background:#0a84ff;color:#fff;font-size:16px;cursor:pointer;white-space:nowrap}
 #soundCard .sClose{padding:9px 14px;background:rgba(255,255,255,.14);font-size:14px}
 /* CarMode 的右上角"菜单"：点开是一个白色二级面板（进入全屏 / 在车机播放声音 / 画面适应 / 断开本浏览器）。 */
-#menuBtn{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));padding:10px 18px;border:1px solid rgba(255,255,255,.16);border-radius:12px;background:rgba(20,26,38,.9);color:#fff;font-size:16px;cursor:pointer;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
-#menuPanel{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:calc(max(14px,env(safe-area-inset-top)) + 52px);width:320px;max-width:calc(100vw - 32px);padding:18px 22px;border-radius:18px;background:#fff;color:#111;text-align:left;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+#menuBtn{position:fixed;z-index:8;right:16px;top:14px;padding:10px 18px;border:1px solid rgba(255,255,255,.16);border-radius:12px;background:rgba(20,26,38,.9);color:#fff;font-size:16px;cursor:pointer;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+/* max()/env() 在 Chromium 53 也是无效值，会整条声明被丢掉，所以这里只用普通像素值。 */
+#menuPanel{position:fixed;z-index:8;right:16px;top:66px;width:320px;max-width:calc(100vw - 32px);padding:18px 22px;border-radius:18px;background:#fff;color:#111;text-align:left;box-shadow:0 16px 48px rgba(0,0,0,.5)}
 #menuPanel .miTitle{font-size:14px;color:#8a8a90;margin:0 0 6px}
 #menuPanel .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:12px 0;font:inherit;font-size:17px;font-weight:600;color:#111;cursor:pointer}
 #menuPanel .miNote{margin:12px 0 0;font-size:13px;line-height:1.55;color:#6b6b70}
-#top{position:fixed;z-index:3;left:16px;right:16px;top:14px;left:max(16px,env(safe-area-inset-left));right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
+#top{position:fixed;z-index:3;left:16px;right:16px;top:14px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
 .badge{padding:9px 13px;border-radius:14px;background:rgba(18,24,36,.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font-size:14px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9f0a;margin-right:8px}.ok .dot{background:#30d158}.bad .dot{background:#ff453a}
 .toolbar{display:flex;flex-direction:column;align-items:flex-end;gap:8px}.actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.actions>*{white-space:nowrap}button,a.chip{pointer-events:auto;border:0;border-radius:13px;padding:9px 13px;background:rgba(18,24,36,.82);color:#fff;font:inherit;font-size:14px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer;text-decoration:none}
-#stats{position:fixed;z-index:3;left:max(16px,env(safe-area-inset-left));top:calc(max(14px,env(safe-area-inset-top)) + 46px);font:12px/1.5 ui-monospace,Menlo,monospace;color:#d1d1d6;white-space:pre}
+#stats{position:fixed;z-index:3;left:16px;top:60px;font:12px/1.5 ui-monospace,Menlo,monospace;color:#d1d1d6;white-space:pre}
 .tp{position:fixed;z-index:4;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;border:3px solid rgba(255,255,255,.9);background:rgba(10,132,255,.35);pointer-events:none}
 #status,#fast,#statsButton,#full{transition:opacity .3s,visibility .3s}
 .idle #top:not(:focus-within) :is(#status,#fast,#statsButton,#full){opacity:0;visibility:hidden}
@@ -78,6 +82,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
     <button class="mi" id="miFit">画面适应 · 保持比例</button>
     <button class="mi" id="miDisconnect">断开本浏览器</button>
     <p class="miNote">点击开启网页声音。要改用手机扬声器，请在 iPhone 控制中心选择 iPhone。</p>
+    <p class="miNote" id="miDiag"></p>
   </div>
 </div></div>
 <div id="stats" class="badge" hidden></div>
@@ -239,7 +244,7 @@ function paintJPEG(bytes){
 // Clock sync with CarWithin (µs): offset = server − client, best of the lowest-RTT samples.
 let clockOffset=null,bestRtt=Infinity,bestAt=0,latencies=[];
 const nowUs=()=>performance.now()*1000;
-function setStatus(text,state=''){label.textContent=text;statusEl.classList.toggle('ok',state==='ok');statusEl.classList.toggle('bad',state==='bad')}
+function setStatus(text,state=''){statusEl.hidden=false;label.textContent=text;statusEl.classList.toggle('ok',state==='ok');statusEl.classList.toggle('bad',state==='bad')}
 function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
 function report(type,text){send({type,text:String(text).slice(0,300)})}
 // At most one request a second: every forced IDR is ~10× a normal frame, so asking faster than
@@ -253,11 +258,11 @@ const AudioContextClass=window.AudioContext||window.webkitAudioContext;
 const mseAudioClock=new Map(),activeAudio=new Set(),audioSchedule=new Map();
 let audioContext=null,audioOffered=false,audioPackets=[],videoStamp=null,videoStampAt=0;
 let audioGestureTimer=0;
-function audioPlaying(){return audioOffered&&audioContext&&audioContext.state==='running'}
-// 车机是老版 Chromium，走的是 JPEG 兼容画面：video 元素从来不会播放，paused 永远为 true。
-// 所以这里不能用 video 状态判断，只要求"已有画面、页面在前台"——否则"开启声音"不出现，
-// 菜单里点"在车机播放声音"也会直接返回，等于完全没法出声。
-function canStartAudio(){return audioOffered&&shown&&!document.hidden}
+let audioRx=0;
+// 能不能出声只取决于这台浏览器有没有 Web Audio，不再看服务端那个 browserAudio 标志——
+// 那个标志一旦是 false，菜单里"在车机播放声音"就永远点了没反应（用户实测就是这样）。
+function audioPlaying(){return !!AudioContextClass&&!!audioContext&&audioContext.state==='running'}
+function canStartAudio(){return !!AudioContextClass&&!document.hidden}
 let audioDropped=0;
 function requestAudio(){if(receiverReady)send({type:'audio',enabled:audioPlaying()})}
 function clearAudio(){
@@ -273,6 +278,8 @@ function audioStateChanged(){
  if(soundCard)soundCard.hidden=!want||soundDismissed;
  const item=$('#miAudio');
  if(item)item.textContent=audioPlaying()?'在车机播放声音 · 已开启':'在车机播放声音';
+ const diag=$('#miDiag');
+ if(diag)diag.textContent='声音：'+(audioPlaying()?'已开启':'未开启')+' · 收到音频包 '+audioRx+(useJPEG?' · 兼容画面':'');
 }
 function ensureAudioPlayback(fromGesture){
  if(!AudioContextClass){audioStateChanged();return}
@@ -298,7 +305,9 @@ function packetTimestamp(u){
  return time.getUint32(0)*4294967296+time.getUint32(4);
 }
 function onAudioPacket(u){
- if(!audioPlaying()||u.length<17||document.hidden)return;
+ if(u.length<17||document.hidden)return;
+ audioRx++;
+ if(!audioPlaying())return;
  audioPackets.push({u,stamp:packetTimestamp(u),arrival:performance.now()/1000});
  if(audioPackets.length>180){audioPackets.shift();audioDropped++}
 }
@@ -478,7 +487,9 @@ function ping(){if(ws&&ws.readyState===1)send({type:'ping',t0:nowUs()})}
 setInterval(ping,1000);
 function firstFrame(){
  if(shown)return;shown=true;attempt=0;hold.hidden=true;clearTimeout(firstFrameTimer);hideStartCard();
- if(fmt)setStatus(`CarPlay ${fmt.width}×${fmt.height} · ${fmt.fps} · ${fmt.name} · ${connectionProtocol}`,'ok');wake();
+ if(fmt)setStatus(`CarPlay ${fmt.width}×${fmt.height} · ${fmt.fps} · ${fmt.name} · ${connectionProtocol}`,'ok');
+ // 按用户要求：出画后不再显示"分辨率 · 帧数 · 编码"那行，整条状态只留给报错用。
+ statusEl.hidden=true;wake();
  // JPEG 兼容模式也要试着开声音：能做到就自动出声，做不到就把"开启声音"页推出来。
  ensureAudioPlayback();
 }
@@ -767,33 +778,53 @@ function pressPoint(key,cx,cy){
 }
 function movePoint(key,cx,cy){const f=fingers.get(key);if(!f)return;f.cx=cx;f.cy=cy;moveDot(f);sendFingers()}
 function liftPoint(key){const f=fingers.get(key);if(!f)return;if(f.dot)f.dot.remove();fingers.delete(key);sendFingers()}
-// 车机是 Crosswalk 23 / Chromium 53，没有 Pointer Events（Chrome 55 才默认开启）。
-// 只挂 pointerdown 的话车机上完全点不动，所以老浏览器改用 touch + mouse 兜底。
-if(window.PointerEvent){
- touchLayer.addEventListener('pointerdown',e=>{
-  try{touchLayer.setPointerCapture(e.pointerId)}catch(_){}
-  pressPoint(e.pointerId,e.clientX,e.clientY);e.preventDefault();
- });
- touchLayer.addEventListener('pointermove',e=>movePoint(e.pointerId,e.clientX,e.clientY));
- ['pointerup','pointercancel','lostpointercapture'].forEach(n=>touchLayer.addEventListener(n,e=>liftPoint(e.pointerId)));
-}else{
- const changed=e=>Array.prototype.slice.call(e.changedTouches||[]);
- touchLayer.addEventListener('touchstart',e=>{
-  for(const t of changed(e))pressPoint('t'+t.identifier,t.clientX,t.clientY);
-  e.preventDefault();
- },{passive:false});
- touchLayer.addEventListener('touchmove',e=>{
-  for(const t of changed(e))movePoint('t'+t.identifier,t.clientX,t.clientY);
-  e.preventDefault();
- },{passive:false});
- ['touchend','touchcancel'].forEach(n=>touchLayer.addEventListener(n,e=>{
-  for(const t of changed(e))liftPoint('t'+t.identifier);
-  e.preventDefault();
- },{passive:false}));
- touchLayer.addEventListener('mousedown',e=>{pressPoint('m',e.clientX,e.clientY);e.preventDefault()});
- touchLayer.addEventListener('mousemove',e=>{if(fingers.has('m'))movePoint('m',e.clientX,e.clientY)});
- document.addEventListener('mouseup',()=>liftPoint('m'));
+// 车机是 Crosswalk 23 / Chromium 53：没有 Pointer Events，而且触摸层在老浏览器上曾经因为没有宽高
+// 变成 0×0。这里不再依赖任何图层的尺寸，直接在 document 上抓手指：
+// 只要落点不是页面自己的按钮/菜单，就一律转发成 CarPlay 的触摸（CarMode 就是这么点的）。
+const CONTROL_SEL='button,#menuBtn,#menuPanel,#soundCard,#startCard,a.chip';
+function onControlAt(cx,cy){
+ let el=null;
+ try{el=document.elementFromPoint(cx,cy)}catch(e){}
+ return !!(el&&el.closest&&el.closest(CONTROL_SEL));
 }
+function bindTouchInput(){
+ const changed=e=>Array.prototype.slice.call(e.changedTouches||[]);
+ if(window.PointerEvent){
+  document.addEventListener('pointerdown',e=>{
+   if(!menuPanel.hidden)return;
+   if(e.pointerType==='mouse'&&e.button!==0)return;
+   if(onControlAt(e.clientX,e.clientY))return;
+   pressPoint('p'+e.pointerId,e.clientX,e.clientY);
+   if(e.cancelable)e.preventDefault();
+  },true);
+  document.addEventListener('pointermove',e=>movePoint('p'+e.pointerId,e.clientX,e.clientY),true);
+  ['pointerup','pointercancel','lostpointercapture'].forEach(n=>document.addEventListener(n,e=>liftPoint('p'+e.pointerId),true));
+  return;
+ }
+ document.addEventListener('touchstart',e=>{
+  if(!menuPanel.hidden)return;
+  let onControl=false;
+  for(const t of changed(e)){
+   if(onControlAt(t.clientX,t.clientY)){onControl=true;continue}
+   pressPoint('t'+t.identifier,t.clientX,t.clientY);
+  }
+  if(!onControl&&e.cancelable)e.preventDefault();
+ },{passive:false,capture:true});
+ document.addEventListener('touchmove',e=>{
+  for(const t of changed(e))movePoint('t'+t.identifier,t.clientX,t.clientY);
+ },{passive:false,capture:true});
+ ['touchend','touchcancel'].forEach(n=>document.addEventListener(n,e=>{
+  for(const t of changed(e))liftPoint('t'+t.identifier);
+ },{passive:false,capture:true}));
+ // 老浏览器还可能只报鼠标事件（外接鼠标/触控板），再兜一层。
+ document.addEventListener('mousedown',e=>{
+  if(!menuPanel.hidden||e.button!==0||onControlAt(e.clientX,e.clientY))return;
+  pressPoint('m',e.clientX,e.clientY);
+ },true);
+ document.addEventListener('mousemove',e=>{if(fingers.has('m'))movePoint('m',e.clientX,e.clientY)},true);
+ document.addEventListener('mouseup',()=>liftPoint('m'),true);
+}
+bindTouchInput();
 function moveDot(f){if(f.dot){f.dot.style.left=f.cx+'px';f.dot.style.top=f.cy+'px'}}
 touchLayer.addEventListener('contextmenu',e=>e.preventDefault());
 document.addEventListener('mousemove',wake);

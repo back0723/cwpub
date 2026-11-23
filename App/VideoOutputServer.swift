@@ -118,6 +118,8 @@ final class VideoOutputServer {
     private var performance: BrowserPerformance = .auto
     private var showTouches = false
     private var browserAudio = false
+    /// Diagnostic latch: log once when the first audio packet actually reaches a page.
+    private var audioForwarded = 0
     private var hls: CarPlayHLS?
     /// Decodes H.264/H.265 into standalone JPEGs for old browsers that cannot survive without
     /// repeated IDR keyframes (Chromium 53 head units). Shared by all JPEG viewers.
@@ -183,12 +185,18 @@ final class VideoOutputServer {
         samples.withUnsafeBytes { packet.append(contentsOf: $0) }
         let wire = packet
         queue.async { [weak self] in
-            guard let self, self.browserAudio else { return }
-            // Video can wait for the next keyframe while the same connection still has
-            // capacity for audio. Only the actual socket backlog limits audio writes.
+            // 原来这里还卡了一道 self.browserAudio：JPEG 兼容画面下这个标志偶尔是 false，
+            // 结果音频永远送不出去。真正该判的是"页面要不要"。
+            guard let self else { return }
+            var delivered = 0
             for client in Array(self.clients.values) where client.wantsAudio && client.streamStarted
                 && client.pendingBytes < self.skipPendingBytes {
                 self.sendWebSocket(wire, opcode: 2, to: client)
+                delivered += 1
+            }
+            if delivered > 0, self.audioForwarded == 0 {
+                self.audioForwarded = 1
+                self.onLog?("开始向车机页面送出音频（\(delivered) 个客户端）")
             }
         }
     }
@@ -456,7 +464,7 @@ final class VideoOutputServer {
             sendJSON(["type": "status", "text": "已连接 CarWithin，正在等待关键帧"], to: client)
             replayGOP(to: client)
         case "audio":
-            let wants = client.usesAudioClock && object["enabled"] as? Bool == true
+            let wants = object["enabled"] as? Bool == true
             if wants != client.wantsAudio {
                 client.wantsAudio = wants
                 // 页面点了"开启声音"才会变成 true；音频流没建起来时这行也会照常打出来，

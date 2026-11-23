@@ -504,10 +504,11 @@ final class NativeReceiver {
                 let media = CarPlayMediaSession(queue: queue, secret: secret, peerAddress: state.peerAddress,
                                                 audioEnabled: configuration.audioEnabled, hevc: configuration.videoCodec == .h265)
                 media.onLog = { [weak self] in self?.log($0) }
-                if configuration.browserAudio {
-                    media.onBrowserAudio = { [weak self] stream, buffer, stamp in
-                        self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
-                    }
+                // 原来这里用 configuration.browserAudio 才挂音频回调：JPEG 兼容模式下这个标志
+                // 一旦是 false，iPhone 的音频连送都进不来。音频要不要给页面由页面自己点，
+                // 这里无条件接住，最多是没客户端要时白白丢掉。
+                media.onBrowserAudio = { [weak self] stream, buffer, stamp in
+                    self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
                 }
                 if let nightMode { media.setNightMode(nightMode) }
                 media.onVideo = { [weak self] data, codec in
