@@ -62,6 +62,11 @@ final class SameDeviceProbe {
         controlConnected = true
         stage("CarPlay 控制连接已建立，正在协商会话")
     }
+    /// The control TCP link died: the next availability notification must ask for a session again.
+    func didDisconnectControl() {
+        controlConnected = false
+        requested = false
+    }
     private func requestSession(_ configuration: ReceiverConfiguration, wireless: Bool = true) throws {
         // iOS 16 sometimes refuses the Wi-Fi group (wrong SSID/channel makes it try to switch
         // networks and drop the request). Same-device installs are already on the LAN, so the
@@ -96,6 +101,10 @@ final class SameDeviceProbe {
                     if packet.control & 0x80 != 0 {
                         guard packet.payload.count >= 13 else { throw ProtocolError.malformed("iAP2 SYN 长度不足") }
                         session = packet.payload[packet.payload.startIndex + 10]
+                        if !linked {
+                            // A fresh link restarts the accessory's own sequence and reassembly.
+                            messageBytes = Data(); sequence = 0x10; lastPayloadSequence = nil
+                        }
                         linked = true; try ack(); stage("本机 iAP2 链路已连接，正在等待配件认证")
                         continue
                     }
@@ -143,11 +152,12 @@ final class SameDeviceProbe {
                 }
             }
             if controlConnected || (!expectsLocalControl && requested) { return }
-            try requestSession(configuration, wireless: false)
+            // The Wi-Fi group is what iOS 16 honours (the address-only form alone did not connect
+            // on a real unit), so send it first and keep the plain form as the retry.
+            try requestSession(configuration, wireless: true)
             if !requested && expectsLocalControl {
                 let run = generation
-                // Alternate both forms: iOS 16 accepts whichever matches its Wi-Fi state.
-                let plans: [(Double, Bool)] = [(3.0, true), (6.0, false), (9.0, true), (12.0, false)]
+                let plans: [(Double, Bool)] = [(3.0, false), (6.0, true), (9.0, false)]
                 for (delay, wireless) in plans {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self, self.active, self.generation == run, !self.controlConnected else { return }
