@@ -454,7 +454,14 @@ final class VideoOutputServer {
             sendJSON(["type": "status", "text": "已连接 CarWithin，正在等待关键帧"], to: client)
             replayGOP(to: client)
         case "audio":
-            client.wantsAudio = client.usesAudioClock && object["enabled"] as? Bool == true
+            let wants = client.usesAudioClock && object["enabled"] as? Bool == true
+            if wants != client.wantsAudio {
+                client.wantsAudio = wants
+                // 页面点了"开启声音"才会变成 true；音频流没建起来时这行也会照常打出来，
+                // 便于区分"页面没开"和"iPhone 没送音频"。
+                onLog?("\(client.peer) 网页声音：\(wants ? "开启" : "关闭")")
+            }
+            if !browserAudio { onLog?("\(client.peer) 本期未向页面送出音频（browserAudio=false）") }
         case "jpeg":
             // Old-browser fallback: switch this viewer to standalone JPEG pictures. No keyframe
             // is needed because each JPEG is a full image. Prepare the decoder from cached SPS/PPS.
