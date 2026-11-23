@@ -602,6 +602,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.toggleReceiver()
         }
         receiver.onBrowserStruggling = { [weak self] peer, reason in self?.browserStruggling(peer: peer, reason: reason) }
+        receiver.onBrowserRefit = { [weak self] peer in
+            guard let self else { return }
+            self.log("车机（\(peer)）点了“按新尺寸重新适配”，按当前窗口尺寸重连 CarPlay")
+            guard self.running, self.modeControl.selectedSegmentIndex == 1 else { return }
+            // 和 CarMode 一致：按车机当前窗口比例重新连一次，会话重启后 iPhone 会重新建流。
+            self.restartCarPlay(reason: "车机页面请求按新尺寸重新适配")
+        }
         receiver.onCarUIRequested = { [weak self] in
             guard let self else { return }
             self.log("在 CarPlay 中点按了 CarWithin 车辆按钮")

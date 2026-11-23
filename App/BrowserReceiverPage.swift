@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.6.0-sound"
+    static let version = "1.7.0-refit"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -39,12 +39,12 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
 #startCard h1{margin:0;font-size:34px;font-weight:600}
 #startCard p{margin:0;font-size:16px;color:#8b9bb4}
 #startCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
-/* 出画后如果网页拿不到播放权限，就给一页"开启声音"，点一下才有声音（CarMode 也是这样）。 */
-#soundCard{position:fixed;z-index:7;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(6,10,16,.94);color:#fff;text-align:center;padding:24px}
-#soundCard h1{margin:0;font-size:30px;font-weight:600}
-#soundCard p{margin:0;font-size:16px;line-height:1.5;color:#8b9bb4;max-width:560px}
-#soundCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
-#soundCard .sClose{padding:11px 24px;background:rgba(255,255,255,.14);font-size:15px}
+/* 出画后如果网页拿不到播放权限，就给一条"开启声音"提示；不做全屏遮罩，免得挡住车机上的操作。 */
+#soundCard{position:fixed;z-index:7;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));transform:translateX(-50%);display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 16px;border-radius:16px;background:rgba(12,18,28,.94);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.5);max-width:calc(100vw - 40px)}
+#soundCard h1{display:none}
+#soundCard p{margin:0;font-size:15px;line-height:1.4;color:#c7d2e0}
+#soundCard button{border:0;border-radius:12px;padding:10px 18px;background:#0a84ff;color:#fff;font-size:16px;cursor:pointer;white-space:nowrap}
+#soundCard .sClose{padding:9px 14px;background:rgba(255,255,255,.14);font-size:14px}
 /* CarMode 的右上角"菜单"：点开是一个白色二级面板（进入全屏 / 在车机播放声音 / 画面适应 / 断开本浏览器）。 */
 #menuBtn{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));padding:10px 18px;border:1px solid rgba(255,255,255,.16);border-radius:12px;background:rgba(20,26,38,.9);color:#fff;font-size:16px;cursor:pointer;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
 #menuPanel{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:calc(max(14px,env(safe-area-inset-top)) + 52px);width:320px;max-width:calc(100vw - 32px);padding:18px 22px;border-radius:18px;background:#fff;color:#111;text-align:left;box-shadow:0 16px 48px rgba(0,0,0,.5)}
@@ -58,6 +58,9 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
 .tp{position:fixed;z-index:4;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;border:3px solid rgba(255,255,255,.9);background:rgba(10,132,255,.35);pointer-events:none}
 #status,#fast,#statsButton,#full{transition:opacity .3s,visibility .3s}
 .idle #top:not(:focus-within) :is(#status,#fast,#statsButton,#full){opacity:0;visibility:hidden}
+/* 车机是 Chromium 53，没有 :focus-within，上面那条规则整条失效 → "CarPlay 1436×640…"一直挂着。
+   补一条只依赖 .idle 的规则，动画结束状态由 wake() 控制。 */
+.idle #status{opacity:0;visibility:hidden}
 .fullscreen :is(#status,.actions,#stats,#startPlayback){display:none}
 .fullscreen #top{justify-content:flex-end}
 [hidden]{display:none!important}
@@ -69,6 +72,8 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
   <div id="menuPanel" hidden>
     <p class="miTitle">浏览器已接入</p>
     <button class="mi" id="miFull">进入全屏</button>
+    <button class="mi" id="miRefit">按新尺寸重新适配</button>
+    <p class="miNote">将按当前窗口比例重新连接 CarPlay。</p>
     <button class="mi" id="miAudio">在车机播放声音</button>
     <button class="mi" id="miFit">画面适应 · 保持比例</button>
     <button class="mi" id="miDisconnect">断开本浏览器</button>
@@ -77,7 +82,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
 </div></div>
 <div id="stats" class="badge" hidden></div>
 <div id="startCard" hidden><h1>浏览器已接入</h1><p>可在手机或浏览器开始连接。</p><button id="startBtn">开始投屏</button></div>
-<div id="soundCard" hidden><h1>声音还没开</h1><p>车机浏览器要求先点一下才能出声。点下面按钮，CarPlay 的声音就从车机喇叭播放。</p><button id="soundBtn">开启声音</button><button id="soundClose" class="sClose">暂不开启</button></div>
+<div id="soundCard" hidden><h1>声音还没开</h1><p>点“开启声音”，CarPlay 的声音就从车机喇叭播放。</p><button id="soundBtn">开启声音</button><button id="soundClose" class="sClose">暂不</button></div>
 <button id="startPlayback" hidden>开始播放</button>
 <script>
 /* This early check uses ES5 so even a restricted WebView can explain why playback cannot start. */
@@ -129,6 +134,10 @@ if(menuBtn){
   try{(d.requestFullscreen||d.webkitRequestFullscreen||function(){}).call(d)}catch(e){}
  };
  $('#miAudio').onclick=function(){menuPanel.hidden=true;soundDismissed=false;ensureAudioPlayback(true)};
+ $('#miRefit').onclick=function(){
+  menuPanel.hidden=true;setStatus('正在按当前窗口尺寸重新连接 CarPlay…');
+  sendDisplay();send({type:'refit'});
+ };
  $('#miFit').onclick=function(){menuPanel.hidden=true;fitFill=!fitFill;applyFit();preference('localStorage','carwithin.fit',fitFill?'fill':'contain')};
  $('#miDisconnect').onclick=function(){
   menuPanel.hidden=true;manualStop=true;clearTimeout(retryTimer);retryTimer=0;
@@ -732,18 +741,42 @@ function sendFingers(){
  for(const f of fingers.values())points.push({id:f.id,x:Math.max(0,Math.min(1,(f.cx-p.x0)/p.w)),y:Math.max(0,Math.min(1,(f.cy-p.y0)/p.h))});
  send({type:'touches',points});
 }
-touchLayer.addEventListener('pointerdown',e=>{
+function pressPoint(key,cx,cy){
  if(fingers.size>=10)return;
- try{touchLayer.setPointerCapture(e.pointerId)}catch(_){}
- const f={id:nextFingerId,cx:e.clientX,cy:e.clientY,dot:null};nextFingerId=(nextFingerId+1)&255;
+ const f={id:nextFingerId,cx,cy,dot:null};nextFingerId=(nextFingerId+1)&255;
  if(showTouches){f.dot=document.createElement('div');f.dot.className='tp';document.body.appendChild(f.dot);moveDot(f)}
- fingers.set(e.pointerId,f);
- sendFingers();e.preventDefault();wake();
-});
+ fingers.set(key,f);sendFingers();wake();
+}
+function movePoint(key,cx,cy){const f=fingers.get(key);if(!f)return;f.cx=cx;f.cy=cy;moveDot(f);sendFingers()}
+function liftPoint(key){const f=fingers.get(key);if(!f)return;if(f.dot)f.dot.remove();fingers.delete(key);sendFingers()}
+// 车机是 Crosswalk 23 / Chromium 53，没有 Pointer Events（Chrome 55 才默认开启）。
+// 只挂 pointerdown 的话车机上完全点不动，所以老浏览器改用 touch + mouse 兜底。
+if(window.PointerEvent){
+ touchLayer.addEventListener('pointerdown',e=>{
+  try{touchLayer.setPointerCapture(e.pointerId)}catch(_){}
+  pressPoint(e.pointerId,e.clientX,e.clientY);e.preventDefault();
+ });
+ touchLayer.addEventListener('pointermove',e=>movePoint(e.pointerId,e.clientX,e.clientY));
+ ['pointerup','pointercancel','lostpointercapture'].forEach(n=>touchLayer.addEventListener(n,e=>liftPoint(e.pointerId)));
+}else{
+ const changed=e=>Array.prototype.slice.call(e.changedTouches||[]);
+ touchLayer.addEventListener('touchstart',e=>{
+  for(const t of changed(e))pressPoint('t'+t.identifier,t.clientX,t.clientY);
+  e.preventDefault();
+ },{passive:false});
+ touchLayer.addEventListener('touchmove',e=>{
+  for(const t of changed(e))movePoint('t'+t.identifier,t.clientX,t.clientY);
+  e.preventDefault();
+ },{passive:false});
+ ['touchend','touchcancel'].forEach(n=>touchLayer.addEventListener(n,e=>{
+  for(const t of changed(e))liftPoint('t'+t.identifier);
+  e.preventDefault();
+ },{passive:false}));
+ touchLayer.addEventListener('mousedown',e=>{pressPoint('m',e.clientX,e.clientY);e.preventDefault()});
+ touchLayer.addEventListener('mousemove',e=>{if(fingers.has('m'))movePoint('m',e.clientX,e.clientY)});
+ document.addEventListener('mouseup',()=>liftPoint('m'));
+}
 function moveDot(f){if(f.dot){f.dot.style.left=f.cx+'px';f.dot.style.top=f.cy+'px'}}
-touchLayer.addEventListener('pointermove',e=>{const f=fingers.get(e.pointerId);if(!f)return;f.cx=e.clientX;f.cy=e.clientY;moveDot(f);sendFingers()});
-function lift(e){const f=fingers.get(e.pointerId);if(!f)return;if(f.dot)f.dot.remove();fingers.delete(e.pointerId);sendFingers()}
-['pointerup','pointercancel','lostpointercapture'].forEach(n=>touchLayer.addEventListener(n,lift));
 touchLayer.addEventListener('contextmenu',e=>e.preventDefault());
 document.addEventListener('mousemove',wake);
 document.addEventListener('visibilitychange',()=>{

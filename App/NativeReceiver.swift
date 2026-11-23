@@ -65,6 +65,8 @@ final class NativeReceiver {
     var onBrowserDisplay: ((BrowserDisplay?, UUID?) -> Void)?
     /// Main thread: the car page tapped "开始投屏"; the peer is the browser address.
     var onBrowserStart: ((String) -> Void)?
+    /// Main thread: the car page asked to reconnect CarPlay at the current window size.
+    var onBrowserRefit: ((String) -> Void)?
     /// Main thread: a browser keeps hitching.
     var onBrowserStruggling: ((String, String) -> Void)?
     /// Main thread: the CarPlay car button was tapped (requestUI).
@@ -130,6 +132,9 @@ final class NativeReceiver {
         videoOutput.onStruggling = { [weak self] peer, reason in DispatchQueue.main.async { self?.onBrowserStruggling?(peer, reason) } }
         videoOutput.onStartRequest = { [weak self] peer in
             DispatchQueue.main.async { self?.onBrowserStart?(peer) }
+        }
+        videoOutput.onRefitRequest = { [weak self] peer in
+            DispatchQueue.main.async { self?.onBrowserRefit?(peer) }
         }
     }
     func start(configuration: ReceiverConfiguration, identity: AccessoryIdentity, advertise: Bool = true,
