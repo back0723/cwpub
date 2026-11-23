@@ -67,6 +67,7 @@ final class NativeReceiver {
     var onLog: ((String) -> Void)?
     var onListening: ((UInt16) -> Void)?
     var onControlConnected: (() -> Void)?
+    var onControlDisconnected: (() -> Void)?
     var onVideo: ((Data, VideoCodec) -> Void)?
     var onAirPlayReady: ((UUID) -> Void)?
     var onVideoOutputState: ((String) -> Void)?
@@ -217,6 +218,8 @@ final class NativeReceiver {
                         self.receive(connection, id: id, state: state, configuration: configuration, identity: identity)
                     case .failed, .cancelled:
                         state.media?.stop(); self.sessions.removeValue(forKey: id); self.connections.removeValue(forKey: id)
+                        self.log("CarPlay 控制连接已断开")
+                        DispatchQueue.main.async { [weak self] in self?.onControlDisconnected?() }
                     default: break
                     }
                 }
