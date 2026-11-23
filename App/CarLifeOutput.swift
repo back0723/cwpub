@@ -170,6 +170,18 @@ final class CarLifeOutput {
 
     // MARK: Video
 
+    /// 把“关键帧开头、一直到当前”的缓存段整段补给车机，让它的解码器有完整依赖链。
+    /// 回放期间不按积压跳过帧，否则序列会断在中途。
+    func replay(_ accessUnits: [Data], codec: VideoCodec, parameterSets: [Data]) {
+        queue.async { [weak self] in
+            guard let self, let session = self.session else { return }
+            for set in parameterSets { _ = self.parameters.absorb(set) }
+            session.replaying = true
+            for unit in accessUnits { self.appendOnQueue(unit, codec: codec) }
+            session.replaying = false
+        }
+    }
+
     private func appendOnQueue(_ accessUnit: Data, codec: VideoCodec) {
         guard running else { return }
         guard codec == .h264 else {
@@ -539,6 +551,8 @@ private final class Session {
     private var parameterSetsSent = false
     private var skips = 0
     private var loggedNoVideoLink = false
+    /// 正在回放缓存段，这期间不按积压跳帧。
+    var replaying = false
     /// Held fingers in the order they went down; pointer-up indexes refer to this order.
     private var touches: [TouchPoint] = []
     /// Above this backlog on the video socket, frames are skipped to the next keyframe.
@@ -688,7 +702,7 @@ private final class Session {
         if waitingForKeyframe {
             guard keyframe else { return }
             waitingForKeyframe = false
-        } else if !keyframe, videoLink.pendingBytes > skipPendingBytes {
+        } else if !keyframe, !replaying, videoLink.pendingBytes > skipPendingBytes {
             // Never drop a single dependent frame: skip the rest of this GOP and ask for an IDR.
             waitingForKeyframe = true; skips += 1
             if skips == 1 || skips % 10 == 0 { log?("车机网络跟不上，跳到下一个关键帧（第 \(skips) 次）") }

@@ -52,10 +52,13 @@ final class NativeReceiver {
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
     private let carLife = CarLifeOutput()
-    /// 最近一个 IDR 访问单元。iPhone 只在会话开始送一个关键帧，之后 forceKeyFrame 会被
-    /// iOS 16 回 408，所以 CarLife 车机连进来时直接把缓存的 IDR 回放给它，不必干等。
-    private var carLifeCachedKeyframe: Data?
-    private var carLifeCachedCodec: VideoCodec = .h264
+    /// 从最近一个 IDR 到当前的全部帧。iPhone 只在会话开始送一个关键帧，之后 forceKeyFrame
+    /// 会被 iOS 16 回 408；车机连进来时把这段缓存按顺序回放，就能从第一帧起连续解码。
+    private var carLifeGOP: [Data] = []
+    private var carLifeGOPBytes = 0
+    private var carLifeGOPCodec: VideoCodec = .h264
+    private var carLifeParamSets: [Data] = []
+    private let carLifeGOPLimit = 12 * 1024 * 1024
     private let zeeho = ZeehoOutput()
     var onZeehoState: ((String) -> Void)?
     private let ninebot = NinebotOutput()
@@ -178,7 +181,7 @@ final class NativeReceiver {
                 self.tailing.start(localAddress: configuration.address, targetAddress: target, phone: phone)
             }
             if configuration.carLifeEnabled {
-                self.carLifeCachedKeyframe = nil
+                self.carLifeGOP = []; self.carLifeGOPBytes = 0; self.carLifeParamSets = []
                 self.carLife.onLog = { [weak self] in self?.log($0) }
                 self.carLife.onState = { [weak self] in self?.onCarLifeState?($0) }
                 self.carLife.onTouches = { [weak self] in self?.touches(source: "carlife", $0) }
@@ -392,13 +395,13 @@ final class NativeReceiver {
     func requestKeyFrame(reason: String) {
         queue.async { [weak self] in self?.requestKeyFrameOnQueue(reason: reason) }
     }
-    /// 车机（CarLife）刚请求画面时调用：把缓存的 IDR 立刻回放过去，让它马上开画，
-    /// 不用等 iPhone 再造一个新关键帧（iOS 16 那条 forceKeyFrame 会被 408 拒绝）。
+    /// 车机（CarLife）刚请求画面时调用：把缓存的那段（关键帧开头，一直到当前）按顺序回放，
+    /// 车机解码器就能从第一帧起连续解码；不用等 iPhone 再造新关键帧（iOS 16 那条会被 408 拒绝）。
     private func sendCachedCarLifeKeyFrame() {
         queue.async { [weak self] in
-            guard let self, let cached = self.carLifeCachedKeyframe else { return }
-            self.log("CarLife：回放缓存的关键帧给车机")
-            self.carLife.append(cached, codec: self.carLifeCachedCodec)
+            guard let self, !self.carLifeGOP.isEmpty else { return }
+            self.log("CarLife：回放缓存的 \(self.carLifeGOP.count) 帧给车机开画")
+            self.carLife.replay(self.carLifeGOP, codec: self.carLifeGOPCodec, parameterSets: self.carLifeParamSets)
         }
     }
 
@@ -541,7 +544,17 @@ final class NativeReceiver {
                     if configuration.ninebotAddress != nil { self.ninebot.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.tailingAddress != nil { self.tailing.append(data, codec: codec) }
                     if configuration.carLifeEnabled {
-                        if keyframe { self.carLifeCachedKeyframe = data; self.carLifeCachedCodec = codec }
+                        // 只留最近一个 GOP：车机后连时靠它从关键帧起连续解码。
+                        if keyframe {
+                            self.carLifeGOP = [data]; self.carLifeGOPBytes = data.count
+                            self.carLifeGOPCodec = codec
+                        } else if self.carLifeGOPBytes + data.count <= self.carLifeGOPLimit, !self.carLifeGOP.isEmpty {
+                            self.carLifeGOP.append(data); self.carLifeGOPBytes += data.count
+                        }
+                        if self.carLifeParamSets.count < 2, let units = try? AnnexB.units(in: data) {
+                            let sets = units.compactMap { codec.parameterSet($0) }
+                            if sets.count >= 2 { self.carLifeParamSets = sets }
+                        }
                         self.carLife.append(data, codec: codec)
                     }
                     if configuration.carLinkRelayAddress != nil { self.carLink.append(data, codec: codec) }
