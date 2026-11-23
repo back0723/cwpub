@@ -28,14 +28,14 @@ jobs:
 
       - name: 编译
         run: |
-          set -x
+          set +e
           xcodebuild -project TDSCarKit.xcodeproj -scheme TDSCarKit -sdk iphoneos \
             -configuration Release -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" build > build.log 2>&1
           status=$?
           echo "exit=$status"
-          grep -n -E "error:|warning: .*renamed" build.log | head -80
+          grep -n -E "error:" build.log | head -80
           tail -30 build.log
           exit $status
 
