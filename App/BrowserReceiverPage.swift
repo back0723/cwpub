@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.8.2-carmode"
+    static let version = "1.8.3-carmode"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -82,7 +82,6 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
     <button class="mi" id="miFit">画面适应 · 保持比例</button>
     <button class="mi" id="miDisconnect">断开本浏览器</button>
     <p class="miNote">点击开启网页声音。要改用手机扬声器，请在 iPhone 控制中心选择 iPhone。</p>
-    <p class="miNote" id="miDiag"></p>
   </div>
 </div></div>
 <div id="stats" class="badge" hidden></div>
@@ -269,8 +268,6 @@ function audioStateChanged(){
  if(soundCard)soundCard.hidden=!want||soundDismissed;
  const item=$('#miAudio');
  if(item)item.textContent=audioPlaying()?'在车机播放声音 · 已开启':'在车机播放声音';
- const diag=$('#miDiag');
- if(diag)diag.textContent='声音：'+(audioPlaying()?'已开启':'未开启')+' · 收到音频包 '+audioRx+(useJPEG?' · 兼容画面':'');
 }
 function ensureAudioPlayback(fromGesture){
  if(!AudioContextClass){audioStateChanged();return}
