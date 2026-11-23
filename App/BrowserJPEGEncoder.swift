@@ -230,7 +230,7 @@ final class BrowserJPEGEncoder {
         }
         let image = CIImage(cvPixelBuffer: buffer)
         let options: [CIImageRepresentationOption: Any] = [
-            .lossyCompressionQuality: quality
+            CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality
         ]
         guard let jpeg = try? ciContext.jpegRepresentation(of: image, colorSpace: colorSpace,
                                                            options: options) else { return }
