@@ -33,6 +33,14 @@ final class CarPlayMediaSession {
             throw ProtocolError.malformed("SETUP 属性列表")
         }
         onLog?("SETUP 字段：\(values.keys.sorted().joined(separator: ", "))")
+        onLog?("SETUP 详情：" + values.keys.sorted().map { key -> String in
+            let value = values[key]
+            if let text = value as? String { return "\(key)=\(text)" }
+            if let number = value as? NSNumber { return "\(key)=\(number)" }
+            if let list = value as? [String] { return "\(key)=[\(list.joined(separator: ","))]" }
+            if let list = value as? [Any] { return "\(key)=\(list.count) 项" }
+            return "\(key)=?"
+        }.joined(separator: "；"))
         var response: [String: Any] = [:]
         if let streams = values["streams"] as? [[String: Any]] {
             var replies: [[String: Any]] = []
@@ -93,7 +101,18 @@ final class CarPlayMediaSession {
             }
             response["streams"] = replies
         } else {
-            guard eventListener == nil else { throw ProtocolError.malformed("重复的初始 SETUP") }
+            // iOS 16 sends the event/timing SETUP first and only asks for the screen stream (type
+            // 110) once the features it proposed are enabled. "mainBuffered" is the switch that
+            // makes the phone deliver the main screen stream at all; without it the phone simply
+            // records the session and never sends video (the classic "waiting for a keyframe").
+            let replyFeatures = enabledFeatures(proposed: values["features"] as? [String])
+            onLog?("回复的会话功能：\(replyFeatures.joined(separator: ", "))")
+            if let listener = eventListener, let timing = self.timing {
+                // The phone may repeat this SETUP after a reconnect; answer with the same ports.
+                onLog?("重复的初始 SETUP，沿用事件/时钟端口 \(listener.port)/\(timing.port)")
+                response = ["eventPort": listener.port, "timingPort": timing.port, "enabledFeatures": replyFeatures]
+                return try PropertyListSerialization.data(fromPropertyList: response, format: .binary, options: 0)
+            }
             let timingPort = (values["timingPort"] as? NSNumber)?.intValue ?? 0
             guard (0...65535).contains(timingPort) else { throw ProtocolError.malformed("时钟同步端口") }
             timing = try MediaTiming(queue: queue, peerAddress: peerAddress, peerPort: UInt16(timingPort))
@@ -102,11 +121,22 @@ final class CarPlayMediaSession {
             if let proposed = values["features"] as? [String] {
                 onLog?("iPhone 提议的会话功能：\(proposed.joined(separator: ", "))")
             }
-            let features = hevc ? ["hevc", "viewAreas"] : ["viewAreas"]
-            response = ["eventPort": listener.port, "timingPort": timing!.port, "enabledFeatures": features]
+            response = ["eventPort": listener.port, "timingPort": timing!.port, "enabledFeatures": replyFeatures]
             onLog?("事件/时钟同步监听器已就绪：\(listener.port)/\(timing!.port)")
         }
         return try PropertyListSerialization.data(fromPropertyList: response, format: .binary, options: 0)
+    }
+
+    /// Features the accessory is willing to enable. Only asking for the screen stream depends on
+    /// `mainBuffered`; `viewAreas` keeps the phone's own layout hints.
+    private func enabledFeatures(proposed: [String]?) -> [String] {
+        var features = ["mainBuffered", "viewAreas"]
+        if hevc { features.append("hevc") }
+        // Keep anything the phone itself proposed that we can honour without changing framing.
+        for value in ["uiContext", "cornerMasks", "focusTransfer"] where proposed?.contains(value) == true {
+            features.append(value)
+        }
+        return features
     }
     private func acceptEvent(_ connection: MediaTCPConnection) {
         guard event == nil else { connection.stop(); return }
