@@ -59,6 +59,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         return selectedSoundOutput
     }
     private let videoOutputSwitch = UISwitch()
+    /// 要不要在 /info 里向 iPhone 声明音频能力。
+    /// CarMode 的日志是"音频开启"才拿到 110 屏幕流；我们回 viewAreas 之后 iPhone 只发三种音频/时钟
+    /// 资源就不再发 SETUP(streams)，所以浏览器输出这条路即便声音选"手机"也必须声明音频能力，
+    /// 否则 iPhone 不回第二条带 streams 的 SETUP，车机永远等不到画面。声音仍按"声音输出"走。
+    private var declaresAudio: Bool {
+        outputMode == .browser ? true : (soundOutput != .phone)
+    }
     private let videoOutputPortField = UITextField()
     private let secureVideoOutputPortField = UITextField()
     private let httpsMode = ChoiceMenu(items: ["本地 IP", "sslip.io", "DuckDNS"])
@@ -1435,7 +1442,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             guard let identity else { return }
             guard let address = localCarPlayAddress else { waitForLocalNetwork(); return }
             var config = ReceiverConfiguration(name: nameField.text ?? "CarWithin", address: address,
-                ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: soundOutput != .phone,
+                ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: declaresAudio,
                 videoOutputPort: outputPort, secureVideoOutputPort: httpsPort,
                 deviceID: ReceiverConfiguration.persistentDeviceID())
             if !restartingAutomatically { autoRestarts = 0; lightLevel = 0; reportedScreen = nil; primaryViewer = nil }
@@ -1474,7 +1481,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let addresses = ReceiverConfiguration.localIPv4Addresses()
         if !addresses.contains(ipField.text ?? "") { ipField.text = browserAddress ?? addresses.first }
         var config = ReceiverConfiguration(name: nameField.text ?? "CarWithin", address: ipField.text ?? "",
-            ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: soundOutput != .phone,
+            ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: declaresAudio,
             videoOutputPort: outputPort, secureVideoOutputPort: httpsPort,
             deviceID: ReceiverConfiguration.persistentDeviceID())
         configureDisplay(&config)
