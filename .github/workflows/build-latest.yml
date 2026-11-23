@@ -28,11 +28,23 @@ jobs:
 
       - name: 编译
         run: |
-          set -o pipefail
+          set -x
           xcodebuild -project TDSCarKit.xcodeproj -scheme TDSCarKit -sdk iphoneos \
             -configuration Release -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" build 2>&1 | tail -150
+            CODE_SIGN_ENTITLEMENTS="" build > build.log 2>&1
+          status=$?
+          echo "exit=$status"
+          grep -n -E "error:|warning: .*renamed" build.log | head -80
+          tail -30 build.log
+          exit $status
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
 
       - name: 打包 IPA
         if: success()
