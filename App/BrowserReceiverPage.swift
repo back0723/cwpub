@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.1.0"
+    static let version = "1.2.0-jpeg"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -89,7 +89,11 @@ const canWebCodecs=window.isSecureContext&&typeof VideoDecoder==='function'&&typ
 // in JPEG mode immediately instead of waiting for a timeout.
 const chromeVer=(function(){const m=/Chr(?:ome|omium)\/(\d+)/.exec(navigator.userAgent);return m?parseInt(m[1],10):0})();
 const oldBrowser=chromeVer>0&&chromeVer<60;
-let useJPEG=/[?&]jpeg=1/.test(location.search)||oldBrowser;
+// Any browser without WebCodecs (Chromium <94, Android 4.x head units) cannot use the low-latency
+// path, and its MSE decoder routinely never produces a frame without a fresh IDR. JPEG needs
+// neither, so make it the default there; ?mse=1 still forces MSE for troubleshooting.
+const noWebCodecs=!canWebCodecs&&!/[?&]mse=1/.test(location.search);
+let useJPEG=/[?&]jpeg=1/.test(location.search)||oldBrowser||noWebCodecs;
 // ?mse=1 forces the compatibility decoder (troubleshooting).
 // Automatic mode remembers, for this browser session, that WebCodecs kept hitching here.
 let useWebCodecs=!useJPEG&&canWebCodecs&&!/[?&]mse=1/.test(location.search)&&preference('sessionStorage','carwithin.mse')!=='1';
@@ -332,7 +336,7 @@ function connect(){
   const ready=()=>{
    receiverReady=true;setStatus('已连接，正在等待画面');
    const decoder=useJPEG?'jpeg':useWebCodecs?'webcodecs':'mse';
-   send({type:'ready',decoder,viewer:viewerID,audioClock:!!AudioContextClass});sendDisplay();requestAudio()
+   send({type:'ready',decoder,viewer:viewerID,audioClock:!!AudioContextClass,ua:(navigator.userAgent||'').slice(0,200)});sendDisplay();requestAudio()
   };
   if(useJPEG||useWebCodecs){ready();return}
   setStatus('已连接，正在启动播放器…');bootMSE(ready)
