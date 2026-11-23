@@ -38,6 +38,9 @@ final class CarLifeOutput {
     var onTouches: (([TouchPoint]) -> Void)?
     var onControl: ((CarPlayControl) -> Void)?
     var onKeyframeRequest: ((String) -> Void)?
+    /// The head unit just asked for a picture. The owner may hand over a cached IDR so the
+    /// receiver does not have to wait for a brand-new keyframe (iOS 16 rejects forceKeyFrame).
+    var onStartFrameNeeded: (() -> Void)?
 
     func start(targetAddress: String?, width: Int, height: Int, fps: Int) {
         queue.async { [weak self] in
@@ -127,6 +130,7 @@ final class CarLifeOutput {
         session.onTouches = { [weak self] in self?.onTouches?($0) }
         session.onControl = { [weak self] in self?.onControl?($0) }
         session.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?("CarLife：\($0)") }
+        session.onStartFrameNeeded = { [weak self] in self?.onStartFrameNeeded?() }
         return session
     }
 
@@ -534,6 +538,7 @@ private final class Session {
     private var waitingForKeyframe = true
     private var parameterSetsSent = false
     private var skips = 0
+    private var loggedNoVideoLink = false
     /// Held fingers in the order they went down; pointer-up indexes refer to this order.
     private var touches: [TouchPoint] = []
     /// Above this backlog on the video socket, frames are skipped to the next keyframe.
@@ -544,6 +549,9 @@ private final class Session {
     var onTouches: (([TouchPoint]) -> Void)?
     var onControl: ((CarPlayControl) -> Void)?
     var onKeyframeRequest: ((String) -> Void)?
+    /// The head unit just asked for a picture. The owner may hand over a cached IDR so the
+    /// receiver does not have to wait for a brand-new keyframe (iOS 16 rejects forceKeyFrame).
+    var onStartFrameNeeded: (() -> Void)?
 
     init(peer: String, width: Int, height: Int, maxFPS: Int) {
         self.peer = peer; self.width = width; self.height = height; self.maxFPS = maxFPS; fps = maxFPS
@@ -627,7 +635,12 @@ private final class Session {
         case 98313:
             try require(authenticated, "unexpected_phase")
             streaming = true; waitingForKeyframe = true
+            loggedNoVideoLink = false
             onState?("CarLife：车机已请求画面，正在等待关键帧")
+            log?("CarLife：车机请求画面（视频通道 \(channels[2] == nil ? "未建立" : "已建立")）")
+            // 现有代码只会向 iPhone 要一个新 IDR。iOS 16.x 会把这个事件命令回 408，
+            // 于是车机永远等不到关键帧。这里同时让上层把缓存中的 IDR 直接回放给车机。
+            onStartFrameNeeded?()
             requestKeyframe("车机请求画面")
         case 98314:
             streaming = false
@@ -663,7 +676,15 @@ private final class Session {
     // MARK: Video
 
     func video(picture: [Data], keyframe: Bool, parameterSets: [Data]) {
-        guard active, authenticated, streaming, let videoLink = channels[2], let profile else { return }
+        guard active, authenticated, streaming else { return }
+        guard let videoLink = channels[2], let profile else {
+            // 只报一次，免得刷屏；这行能区分“通道没建”和“参数集没拿到”。
+            if !loggedNoVideoLink {
+                loggedNoVideoLink = true
+                log?("CarLife：画面暂不可发（视频通道\(channels[2] == nil ? "未建立" : "已建立")，编码参数\(profile == nil ? "缺失" : "就绪")）")
+            }
+            return
+        }
         if waitingForKeyframe {
             guard keyframe else { return }
             waitingForKeyframe = false
@@ -702,7 +723,12 @@ private final class Session {
         let now = DispatchTime.now().uptimeNanoseconds
         if now - lastSent.uptimeNanoseconds > 1_000_000_000 { send(channels[2] != nil ? 2 : 1, 131074) }
         // Some head units only recover from decoder resets at a keyframe; keep them regular.
-        if streaming, now - lastKeyframeRequest.uptimeNanoseconds >= 1_500_000_000 { requestKeyframe(nil) }
+        if streaming, now - lastKeyframeRequest.uptimeNanoseconds >= 1_500_000_000 {
+            // 一帧都还没发出去时，同时让上层把缓存 IDR 再回放一次：
+            // 车机常常是“先请求画面、后开视频通道”，第一次回放会落在通道还没建的空档上。
+            if framesSent == 0, waitingForKeyframe { onStartFrameNeeded?() }
+            requestKeyframe(nil)
+        }
     }
 
     private func requestKeyframe(_ reason: String?) {

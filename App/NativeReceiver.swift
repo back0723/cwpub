@@ -52,6 +52,10 @@ final class NativeReceiver {
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
     private let carLife = CarLifeOutput()
+    /// 最近一个 IDR 访问单元。iPhone 只在会话开始送一个关键帧，之后 forceKeyFrame 会被
+    /// iOS 16 回 408，所以 CarLife 车机连进来时直接把缓存的 IDR 回放给它，不必干等。
+    private var carLifeCachedKeyframe: Data?
+    private var carLifeCachedCodec: VideoCodec = .h264
     private let zeeho = ZeehoOutput()
     var onZeehoState: ((String) -> Void)?
     private let ninebot = NinebotOutput()
@@ -174,11 +178,13 @@ final class NativeReceiver {
                 self.tailing.start(localAddress: configuration.address, targetAddress: target, phone: phone)
             }
             if configuration.carLifeEnabled {
+                self.carLifeCachedKeyframe = nil
                 self.carLife.onLog = { [weak self] in self?.log($0) }
                 self.carLife.onState = { [weak self] in self?.onCarLifeState?($0) }
                 self.carLife.onTouches = { [weak self] in self?.touches(source: "carlife", $0) }
                 self.carLife.onControl = { [weak self] in self?.press($0) }
                 self.carLife.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
+                self.carLife.onStartFrameNeeded = { [weak self] in self?.sendCachedCarLifeKeyFrame() }
                 self.carLife.start(targetAddress: configuration.carLifeAddress, width: configuration.width,
                                    height: configuration.height, fps: configuration.maxFPS)
             }
@@ -386,6 +392,16 @@ final class NativeReceiver {
     func requestKeyFrame(reason: String) {
         queue.async { [weak self] in self?.requestKeyFrameOnQueue(reason: reason) }
     }
+    /// 车机（CarLife）刚请求画面时调用：把缓存的 IDR 立刻回放过去，让它马上开画，
+    /// 不用等 iPhone 再造一个新关键帧（iOS 16 那条 forceKeyFrame 会被 408 拒绝）。
+    private func sendCachedCarLifeKeyFrame() {
+        queue.async { [weak self] in
+            guard let self, let cached = self.carLifeCachedKeyframe else { return }
+            self.log("CarLife：回放缓存的关键帧给车机")
+            self.carLife.append(cached, codec: self.carLifeCachedCodec)
+        }
+    }
+
     private func requestKeyFrameOnQueue(reason: String) {
         let now = DispatchTime.now()
         if keyframeWantedSince == nil { keyframeWantedSince = now; keyframeAttempts = 0; keyframeReason = reason }
@@ -524,7 +540,10 @@ final class NativeReceiver {
                     if configuration.zeehoAddress != nil { self.zeeho.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.ninebotAddress != nil { self.ninebot.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.tailingAddress != nil { self.tailing.append(data, codec: codec) }
-                    if configuration.carLifeEnabled { self.carLife.append(data, codec: codec) }
+                    if configuration.carLifeEnabled {
+                        if keyframe { self.carLifeCachedKeyframe = data; self.carLifeCachedCodec = codec }
+                        self.carLife.append(data, codec: codec)
+                    }
                     if configuration.carLinkRelayAddress != nil { self.carLink.append(data, codec: codec) }
                     if self.localSkipping {
                         guard keyframe, self.localInFlight < self.maximumLocalInFlight / 2 else { return }
