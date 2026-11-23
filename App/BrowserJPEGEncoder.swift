@@ -86,7 +86,7 @@ final class BrowserJPEGEncoder {
     /// Tear down the decoder. Called when no JPEG viewer remains.
     func invalidate() {
         queue.async {
-            if let session {
+            if let session = self.session {
                 VTDecompressionSessionWaitForAsynchronousFrames(session)
                 VTDecompressionSessionInvalidate(session)
             }
@@ -230,7 +230,7 @@ final class BrowserJPEGEncoder {
         }
         let image = CIImage(cvPixelBuffer: buffer)
         let options: [CIImageRepresentationOption: Any] = [
-            kCGImageDestinationLossyCompressionQuality: quality
+            .lossyCompressionQuality: quality
         ]
         guard let jpeg = try? ciContext.jpegRepresentation(of: image, colorSpace: colorSpace,
                                                            options: options) else { return }
