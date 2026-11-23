@@ -529,6 +529,7 @@ final class NativeReceiver {
                 media.onBrowserAudio = { [weak self] stream, buffer, stamp in
                     self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
                 }
+                media.browserAudioWanted = { [weak self] in self?.videoOutput.hasAudioViewers ?? false }
                 if let nightMode { media.setNightMode(nightMode) }
                 media.onVideo = { [weak self] data, codec in
                     guard let self else { return }

@@ -429,6 +429,12 @@ final class VideoOutputServer {
         } catch { close(client, reason: "\(client.peer) 协议错误：\(error.localizedDescription)") }
     }
 
+    /// 有没有车机页面在要声音。CarLife 模式下没有页面在听，这时音频要留给手机上本地播放，
+    /// 否则声音既不上车机、也不出手机，等于全程静音（日志里"有画面但没有声音"就是这样）。
+    var hasAudioViewers: Bool {
+        queue.sync { clients.values.contains { $0.wantsAudio } }
+    }
+
     private func handleText(_ text: String, client: Client) throws {
         guard let data = text.data(using: .utf8),
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],

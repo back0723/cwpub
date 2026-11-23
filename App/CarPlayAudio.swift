@@ -82,6 +82,8 @@ final class CarPlayAudio {
     #endif
     var onLog: ((String) -> Void)?
     var onBrowserAudio: ((AVAudioPCMBuffer, UInt64) -> Void)?
+    /// 车机页面上是否真的有人在要声音。返回 false（或未设置）时音频在本机播放。
+    var shouldForwardAudio: (() -> Bool)?
     init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format
         decoder = try NativeAudioDecoder(format: format)
@@ -105,7 +107,9 @@ final class CarPlayAudio {
             if let lastTimestamp, Int32(bitPattern: packet.timestamp &- lastTimestamp) <= 0 { latePackets += 1; return }
             lastTimestamp = packet.timestamp
             guard let buffer = try decoder.decode(packet.samples) else { return }
-            if let onBrowserAudio {
+            // 只有在车机页面上真的有人在要声音时才转发；没人要就让下面的本地播放跑起来，
+            // 不然这条音频包会被转发到一个不存在的听众那里，手机和车机同时没声音。
+            if let onBrowserAudio, shouldForwardAudio?() ?? true {
                 onBrowserAudio(buffer, browserTimestamp(packet.timestamp, arrival: arrival))
                 return
             }
