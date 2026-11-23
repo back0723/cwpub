@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.8.3-carmode"
+    static let version = "1.8.4-carmode"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -865,8 +865,11 @@ window.addEventListener('popstate',function(){
  if(isFullscreen()||pseudoFull())exitFullscreenNow();
 });
 armBackGuard();
-if($('#statsButton'))$('#statsButton').onclick=()=>{statsEl.hidden=!statsEl.hidden;preference('localStorage','carplays.stats',statsEl.hidden?'0':'1')};
-if(preference('localStorage','carplays.stats')==='1'||debug)statsEl.hidden=false;
+// 用户要求：车机屏幕上不要挂那坨黑色统计（HTTP/JPEG、fps、音频缓冲…）。
+// 永久隐藏，同时把之前存在 localStorage 里的开关也清掉，免得升级后又被打开。
+statsEl.hidden=true;
+statsEl.style.display='none';
+try{preference('localStorage','carplays.stats','0')}catch(e){}
 if(!canWebCodecs&&location.protocol==='https:')report('info','HTTPS 页面但浏览器没有 WebCodecs，使用 MSE');
 
 // ---------- screen report ----------
