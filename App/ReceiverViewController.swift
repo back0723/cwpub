@@ -1060,7 +1060,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let source = outputMode != .browser ? headUnitOutput.selectedTitle
             : followsCarScreen ? (screen.map { "车机屏幕 \($0.title)" } ?? "尚无车机屏幕，用固定分辨率") : "固定尺寸"
         log("画面计划：\(plan.width)×\(plan.height) @ \(plan.fps) FPS \(plan.codec.displayName)（\(source)\(lightLevel > 0 ? "，减轻档 \(lightLevel)" : "")）")
-        config.browserAudio = soundOutput == .browser && config.videoOutputPort != nil && outputMode == .browser
+        // 车机页面上的"在车机播放声音"要求音频帧一直送到页面：页面只有在用户点开菜单项
+        // （或点"开启声音"）时才真正播放，所以这里始终把音频送往浏览器，声音开关交给页面。
+        config.browserAudio = config.videoOutputPort != nil && outputMode == .browser
         if outputMode == .airPlay, config.videoOutputPort != nil { config.airPlayStreamID = UUID() }
         if outputMode == .zeeho {
             config.zeehoAddress = (zeehoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
