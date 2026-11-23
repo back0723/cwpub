@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.7.0-refit"
+    static let version = "1.8.0-carmode"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -131,9 +131,27 @@ if(menuBtn){
  $('#miFull').onclick=function(){
   menuPanel.hidden=true;
   const d=document.documentElement;
-  try{(d.requestFullscreen||d.webkitRequestFullscreen||function(){}).call(d)}catch(e){}
+  try{
+   if(isFullscreen()){
+    const exit=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen;
+    if(exit)exit.call(document);
+   }else{
+    const enter=d.requestFullscreen||d.webkitRequestFullscreen||d.msRequestFullscreen;
+    if(enter)enter.call(d);
+   }
+  }catch(e){}
  };
- $('#miAudio').onclick=function(){menuPanel.hidden=true;soundDismissed=false;ensureAudioPlayback(true)};
+ $('#miAudio').onclick=function(){
+  menuPanel.hidden=true;
+  if(audioPlaying()){
+   // 再点一次就关掉：挂起 AudioContext，顺便让 iPhone 停止送音频。
+   soundDismissed=true;
+   try{audioContext.suspend()}catch(e){}
+   audioStateChanged();
+  }else{
+   soundDismissed=false;ensureAudioPlayback(true);
+  }
+ };
  $('#miRefit').onclick=function(){
   menuPanel.hidden=true;setStatus('正在按当前窗口尺寸重新连接 CarPlay…');
   sendDisplay();send({type:'refit'});
@@ -787,7 +805,11 @@ document.addEventListener('visibilitychange',()=>{
 });
 if($('#full'))$('#full').onclick=()=>{const d=document.documentElement;(d.requestFullscreen||d.webkitRequestFullscreen||(()=>{})).call(d)};
 function isFullscreen(){return !!(document.fullscreenElement||document.webkitFullscreenElement)}
-function fullscreenChanged(){document.body.classList.toggle('fullscreen',isFullscreen());wake()}
+function fullscreenChanged(){
+ document.body.classList.toggle('fullscreen',isFullscreen());
+ const item=$('#miFull');if(item)item.textContent=isFullscreen()?'退出全屏':'进入全屏';
+ wake();sendDisplay();
+}
 document.addEventListener('fullscreenchange',fullscreenChanged);
 document.addEventListener('webkitfullscreenchange',fullscreenChanged);
 if($('#statsButton'))$('#statsButton').onclick=()=>{statsEl.hidden=!statsEl.hidden;preference('localStorage','carplays.stats',statsEl.hidden?'0':'1')};
@@ -821,7 +843,13 @@ function sendDisplay(){
 probeH265().then(v=>{h265Ok=v;sendDisplay()});
 measureRefresh();
 window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(sendDisplay,1500)});
-boot();
+// 老车机上任何一句抛错都会让整页停在"播放器未能启动"。这里把错误抓到状态条上报出来，
+// 页面还能继续跑（最多丢一个功能），不再是整页黑屏。
+window.addEventListener('error',function(ev){
+ try{report('error','页面脚本错误：'+(ev.message||'unknown')+' @'+(ev.lineno||0))}catch(e){}
+ setStatus('页面出错：'+(ev.message||'unknown'),'bad');
+});
+try{boot()}catch(e){setStatus('播放器启动失败：'+(e&&e.message?e.message:e),'bad');report('error','播放器启动失败：'+(e&&e.message?e.message:e))}
 </script></body></html>
 """#.utf8)
 }
