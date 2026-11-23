@@ -238,6 +238,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         if !running { modeChanged() }
+        startBrowserPage()
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.checkForUpdates(manual: false)
         }
@@ -584,6 +585,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.updateCarLifeStatus(message)
         }
         receiver.onBrowserDisplay = { [weak self] display, viewerID in self?.browserReportedDisplay(display, viewerID: viewerID) }
+        receiver.onBrowserStart = { [weak self] peer in
+            guard let self else { return }
+            self.log("车机（\(peer)）在页面上点了“开始投屏”")
+            guard !self.running, !self.waitingForNetwork else { return }
+            // 车机那边点了按钮，就从这里发起 CarPlay，等同手机上按启动。
+            self.modeControl.selectedSegmentIndex = 1
+            self.modeChanged()
+            self.toggleReceiver()
+        }
         receiver.onBrowserStruggling = { [weak self] peer, reason in self?.browserStruggling(peer: peer, reason: reason) }
         receiver.onCarUIRequested = { [weak self] in
             guard let self else { return }
@@ -1584,6 +1594,26 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         modeChanged()
         statusLabel.text = identity == nil ? "需要导入 MFi 身份" : "已停止"
         log("CarPlay 接收已停止")
+        // 会话停了，但车机页面继续常驻，屏幕上会重新出现"开始投屏"。
+        startBrowserPage()
+    }
+    /// 浏览器输出模式下让接收页常驻，车机可以先打开页面、上报尺寸，再点"开始投屏"发起会话。
+    /// CarMode 用的就是这个顺序：页面 → 车机点按钮 → iPhone 建 CarPlay。
+    private func startBrowserPage() {
+        guard outputMode == .browser, videoOutputSwitch.isOn, !running, !waitingForNetwork else { return }
+        guard let address = browserAddress, let port = browserPort, browserPortError == nil else { return }
+        var config = ReceiverConfiguration(name: nameField.text ?? "CarWithin", address: address,
+            ssid: ssidField.text ?? "", password: "", wifiChannel: 36, audioEnabled: false,
+            videoOutputPort: port, secureVideoOutputPort: secureBrowserPort,
+            deviceID: ReceiverConfiguration.persistentDeviceID())
+        let screen = targetScreen
+        let plan = planDisplay(for: screen)
+        config.width = plan.width; config.height = plan.height
+        config.maxFPS = plan.fps; config.videoCodec = plan.codec; config.widthPhysicalMM = plan.iconWidthMM
+        config.browserPerformance = selectedPerformance
+        config.showTouches = showTouchesSwitch.isOn
+        config.browserAudio = false
+        receiver.startBrowserOnly(config)
     }
 
     private func clearStartupHint() {

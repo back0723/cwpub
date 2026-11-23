@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.3.0-carmode"
+    static let version = "1.4.0-startbutton"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -34,6 +34,11 @@ enum BrowserReceiverPage {
 main{position:relative;width:100%;height:100%}video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
 #touch{position:absolute;inset:0;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 #startPlayback{position:fixed;z-index:5;top:50%;left:50%;transform:translate(-50%,-50%);background:#0a84ff;font-size:17px;padding:12px 20px}
+/* CarMode 那种入口：页面先接入，屏幕上给一个"开始投屏"按钮，点了才发起 CarPlay 会话。 */
+#startCard{position:fixed;z-index:6;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0d1626;color:#fff;text-align:center;padding:24px}
+#startCard h1{margin:0;font-size:34px;font-weight:600}
+#startCard p{margin:0;font-size:16px;color:#8b9bb4}
+#startCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
 #top{position:fixed;z-index:3;left:16px;right:16px;top:14px;left:max(16px,env(safe-area-inset-left));right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
 .badge{padding:9px 13px;border-radius:14px;background:rgba(18,24,36,.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font-size:14px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9f0a;margin-right:8px}.ok .dot{background:#30d158}.bad .dot{background:#ff453a}
 .toolbar{display:flex;flex-direction:column;align-items:flex-end;gap:8px}.actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.actions>*{white-space:nowrap}button,a.chip{pointer-events:auto;border:0;border-radius:13px;padding:9px 13px;background:rgba(18,24,36,.82);color:#fff;font:inherit;font-size:14px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer;text-decoration:none}
@@ -52,6 +57,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
   <button id="enableAudio" hidden>开启声音</button>
 </div></div>
 <div id="stats" class="badge" hidden></div>
+<div id="startCard" hidden><h1>浏览器已接入</h1><p>可在手机或浏览器开始连接。</p><button id="startBtn">开始投屏</button></div>
 <button id="startPlayback" hidden>开始播放</button>
 <script>
 /* This early check uses ES5 so even a restricted WebView can explain why playback cannot start. */
@@ -74,6 +80,17 @@ const video=$('#video'),view=$('#view'),hold=$('#hold'),touchLayer=$('#touch'),s
 const MS=(/iPhone|iPad|iPod/.test(navigator.userAgent)&&window.ManagedMediaSource)||window.MediaSource||window.ManagedMediaSource;
 const managedMSE=!!MS&&MS===window.ManagedMediaSource;
 const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');
+const startCard=$('#startCard'),startBtn=$('#startBtn');
+// 页面接入但还没画面时给出"开始投屏"，由车机这边发起 CarPlay 会话（和 CarMode 一致）。
+function showStartCard(){if(startCard&&!shown)startCard.hidden=false}
+function hideStartCard(){if(startCard)startCard.hidden=true}
+if(startBtn){
+ startBtn.onclick=function(){
+  hideStartCard();setStatus('已请求开始投屏，正在连接 CarPlay…');
+  send({type:'startProjection'});
+  window.setTimeout(function(){if(!shown)showStartCard()},12000);
+ };
+}
 function preference(storage,key,value){
  try{const store=window[storage];if(value===undefined)return store.getItem(key);store.setItem(key,value)}catch(e){}
  return null
@@ -335,6 +352,8 @@ function connect(){
   ping();
   const ready=()=>{
    receiverReady=true;setStatus('已连接，正在等待画面');
+   // 会话已经在跑（页面马上会收到 format）就不弹"开始投屏"，否则给一个发起入口。
+   window.setTimeout(function(){if(!fmt&&!shown)showStartCard()},1200);
    const decoder=useJPEG?'jpeg':useWebCodecs?'webcodecs':'mse';
    send({type:'ready',decoder,viewer:viewerID,audioClock:!!AudioContextClass,ua:(navigator.userAgent||'').slice(0,200)});sendDisplay();requestAudio()
   };
@@ -360,6 +379,7 @@ function onText(m){
  if(m.type==='status'){if(!shown)setStatus(m.text);return}
  if(m.type!=='format')return;
  if(m.page!==PAGE_VERSION){location.reload();return}
+ hideStartCard();
  fmt=m;
  if(m.decoder==='jpeg'){setStatus(`CarPlay ${m.width}×${m.height} · JPEG 兼容（无需关键帧）`,'ok');armFirstFrameTimer(m);return}
  if(m.decoder==='webcodecs')configureWC(m);else formatMSE(m);
@@ -367,7 +387,7 @@ function onText(m){
 function ping(){if(ws&&ws.readyState===1)send({type:'ping',t0:nowUs()})}
 setInterval(ping,1000);
 function firstFrame(){
- if(shown)return;shown=true;attempt=0;hold.hidden=true;clearTimeout(firstFrameTimer);
+ if(shown)return;shown=true;attempt=0;hold.hidden=true;clearTimeout(firstFrameTimer);hideStartCard();
  if(fmt)setStatus(`CarPlay ${fmt.width}×${fmt.height} · ${fmt.fps} · ${fmt.name} · ${connectionProtocol}`,'ok');wake();
  if(useWebCodecs)ensureAudioPlayback();
 }

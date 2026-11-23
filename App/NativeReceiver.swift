@@ -45,6 +45,9 @@ final class NativeReceiver {
     private var nightMode: Bool?
     /// 主线程：最近一次车机网页上报的真实视口（工具栏收起后的全屏尺寸）。
     private var headUnitScreen: BrowserDisplay?
+    /// 浏览器接收页是否在跑；它与 CarPlay 会话解耦，会话停止后页面仍在。
+    private var browserRunning = false
+    private var browserPort: UInt16?
     private var generation = UUID()
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
@@ -60,6 +63,8 @@ final class NativeReceiver {
     var onCarLinkState: ((String) -> Void)?
     /// Main thread: the primary browser's screen changed.
     var onBrowserDisplay: ((BrowserDisplay?, UUID?) -> Void)?
+    /// Main thread: the car page tapped "开始投屏"; the peer is the browser address.
+    var onBrowserStart: ((String) -> Void)?
     /// Main thread: a browser keeps hitching.
     var onBrowserStruggling: ((String, String) -> Void)?
     /// Main thread: the CarPlay car button was tapped (requestUI).
@@ -75,29 +80,63 @@ final class NativeReceiver {
     var onVideoOutputState: ((String) -> Void)?
     var onFailure: (() -> Void)?
 
+    /// 浏览器接收页在会话启动前就常驻（CarMode 的做法，端口 8787 那一版的等效实现）。
+    func startBrowserOnly(_ configuration: ReceiverConfiguration) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard let port = configuration.videoOutputPort else { return }
+            // 已经在同一端口常驻就不用重启，否则车机页面会白屏重连一次。
+            if self.browserRunning, self.browserPort == port { return }
+            self.stopOnQueue(keepingBrowser: false)
+            self.wireBrowserOutput()
+            self.displaySize = (configuration.width, configuration.height)
+            self.startVideoOutput(port: port, securePort: configuration.secureVideoOutputPort,
+                                  width: configuration.width, height: configuration.height, fps: configuration.maxFPS,
+                                  performance: configuration.browserPerformance, showTouches: configuration.showTouches,
+                                  preferredViewer: nil, browserAudio: configuration.browserAudio, airPlayStreamID: nil)
+            self.log("浏览器接收页已常驻（端口 \(port)），可在车机页面上点“开始投屏”")
+        }
+    }
+    private func startVideoOutput(port: UInt16, securePort: UInt16?, width: Int, height: Int, fps: Int,
+                                  performance: BrowserPerformance, showTouches: Bool,
+                                  preferredViewer: UUID?, browserAudio: Bool, airPlayStreamID: UUID?) {
+        browserRunning = true
+        browserPort = port
+        videoOutput.start(port: port, securePort: securePort, width: width, height: height, fps: fps,
+                          performance: performance, showTouches: showTouches, preferredViewer: preferredViewer,
+                          browserAudio: browserAudio, airPlayStreamID: airPlayStreamID)
+    }
+    private func wireBrowserOutput() {
+        videoOutput.onLog = { [weak self] in self?.log($0) }
+        videoOutput.onAirPlayReady = { [weak self] id in
+            DispatchQueue.main.async { [weak self] in self?.onAirPlayReady?(id) }
+        }
+        videoOutput.onState = { [weak self] in self?.onVideoOutputState?($0) }
+        videoOutput.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
+        videoOutput.onTouches = { [weak self] source, points in self?.touches(source: source, points) }
+        videoOutput.onControl = { [weak self] in self?.press($0) }
+        videoOutput.onDisplay = { [weak self] display, viewerID in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let display, display.height >= 500 { self.headUnitScreen = display }
+                self.onBrowserDisplay?(display, viewerID)
+            }
+        }
+        videoOutput.onStruggling = { [weak self] peer, reason in DispatchQueue.main.async { self?.onBrowserStruggling?(peer, reason) } }
+        videoOutput.onStartRequest = { [weak self] peer in
+            DispatchQueue.main.async { self?.onBrowserStart?(peer) }
+        }
+    }
     func start(configuration: ReceiverConfiguration, identity: AccessoryIdentity, advertise: Bool = true,
                preferredViewer: UUID? = nil) {
         let listening = onListening
         queue.async { [weak self] in
             guard let self else { return }
-            self.stopOnQueue()
-            self.videoOutput.onLog = { [weak self] in self?.log($0) }
-            self.videoOutput.onAirPlayReady = { [weak self] id in
-                DispatchQueue.main.async { [weak self] in self?.onAirPlayReady?(id) }
-            }
-            self.videoOutput.onState = { [weak self] in self?.onVideoOutputState?($0) }
-            self.videoOutput.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
+            // 浏览器接收页常驻（CarMode 的做法）：车机网页在会话启动前就能打开、上报尺寸、
+            // 并由页面上的"开始投屏"按钮发起会话，所以这里不能顺手把页面服务一起停掉。
+            self.stopOnQueue(keepingBrowser: self.browserRunning)
+            self.wireBrowserOutput()
             self.displaySize = (configuration.width, configuration.height)
-            self.videoOutput.onTouches = { [weak self] source, points in self?.touches(source: source, points) }
-            self.videoOutput.onControl = { [weak self] in self?.press($0) }
-            self.videoOutput.onDisplay = { [weak self] display, viewerID in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    if let display, display.height >= 500 { self.headUnitScreen = display }
-                    self.onBrowserDisplay?(display, viewerID)
-                }
-            }
-            self.videoOutput.onStruggling = { [weak self] peer, reason in DispatchQueue.main.async { self?.onBrowserStruggling?(peer, reason) } }
             if let target = configuration.zeehoAddress {
                 let phone = configuration.tailingPhoneInfo ?? TailingPhoneInfo(package: Bundle.main.bundleIdentifier ?? "CarWithin",
                     versionCode: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0,
@@ -143,12 +182,12 @@ final class NativeReceiver {
                 self.carLink.onKeyframe = { [weak self] in self?.requestKeyFrame(reason: "CarLink 中继") }
                 self.carLink.start(host: address, port: ReceiverConfiguration.carLinkRelayPort, fps: configuration.maxFPS)
             }
-            if let port = configuration.videoOutputPort {
-                self.videoOutput.start(port: port, securePort: configuration.secureVideoOutputPort,
-                                       width: configuration.width, height: configuration.height, fps: configuration.maxFPS,
-                                       performance: configuration.browserPerformance, showTouches: configuration.showTouches,
-                                       preferredViewer: preferredViewer, browserAudio: configuration.browserAudio,
-                                       airPlayStreamID: configuration.airPlayStreamID)
+            if let port = configuration.videoOutputPort, !self.browserRunning || self.browserPort != port {
+                self.startVideoOutput(port: port, securePort: configuration.secureVideoOutputPort,
+                                      width: configuration.width, height: configuration.height, fps: configuration.maxFPS,
+                                      performance: configuration.browserPerformance, showTouches: configuration.showTouches,
+                                      preferredViewer: preferredViewer, browserAudio: configuration.browserAudio,
+                                      airPlayStreamID: configuration.airPlayStreamID)
             }
             do { self.airPlayIdentity = advertise ? try AirPlayCredentials() : nil }
             catch { self.fail("AirPlay 身份创建失败：\(error.localizedDescription)"); return }
@@ -283,7 +322,10 @@ final class NativeReceiver {
         log(message); stopOnQueue()
         DispatchQueue.main.async { [weak self] in self?.onFailure?() }
     }
-    func stop() { queue.async { [weak self] in self?.stopOnQueue() } }
+    /// 只停 CarPlay 会话，浏览器接收页继续常驻（车机那边会退回"开始投屏"）。
+    func stop() { queue.async { [weak self] in self?.stopOnQueue(keepingBrowser: true) } }
+    /// 连同浏览器接收页一起关掉（关应用、切换输出方式时用）。
+    func stopAll() { queue.async { [weak self] in self?.stopOnQueue() } }
     private var activeMedia: CarPlayMediaSession? { sessions.values.first(where: { $0.media != nil })?.media }
     /// All fingers currently held by `source` (normalized 0…1); an empty list releases them.
     func touches(source: String, _ points: [TouchPoint]) {
@@ -363,10 +405,10 @@ final class NativeReceiver {
     private static func containsRandomAccess(_ accessUnit: Data, codec: VideoCodec) -> Bool {
         (try? AnnexB.units(in: accessUnit))?.contains { codec.isRandomAccess($0) } ?? false
     }
-    private func stopOnQueue() {
+    private func stopOnQueue(keepingBrowser: Bool = false) {
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
         generation = UUID(); listener?.cancel(); listener = nil
-        videoOutput.stop()
+        if !keepingBrowser { videoOutput.stop(); browserRunning = false }
         carLife.stop()
         zeeho.stop()
         ninebot.stop()

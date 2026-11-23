@@ -106,6 +106,8 @@ final class VideoOutputServer {
     /// Source id (one per viewer) and every finger it holds, normalized; empty releases them.
     var onTouches: ((String, [TouchPoint]) -> Void)?
     var onControl: ((CarPlayControl) -> Void)?
+    /// 车机页面点了"开始投屏"：由页面发起 CarPlay 会话（CarMode 的做法）。
+    var onStartRequest: ((String) -> Void)?
     var onKeyframeRequest: ((String) -> Void)?
     /// The primary page's screen changed or the primary page disconnected.
     var onDisplay: ((BrowserDisplay?, UUID?) -> Void)?
@@ -495,6 +497,10 @@ final class VideoOutputServer {
         case "control":
             guard let name = object["name"] as? String, let control = CarPlayControl(rawValue: name) else { break }
             onControl?(control)
+        case "startProjection":
+            // 车机页面上的"开始投屏"按钮：请求会话由页面发起，和 CarMode 的入口一致。
+            onLog?("\(client.peer) 在车机页面上点了“开始投屏”")
+            onStartRequest?(client.peer)
         case "display":
             guard client.browserReady else { break }
             func int(_ key: String) -> Int? { (object[key] as? NSNumber)?.intValue }
