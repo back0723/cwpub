@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.5.0-menu"
+    static let version = "1.6.0-sound"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -39,6 +39,12 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
 #startCard h1{margin:0;font-size:34px;font-weight:600}
 #startCard p{margin:0;font-size:16px;color:#8b9bb4}
 #startCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
+/* 出画后如果网页拿不到播放权限，就给一页"开启声音"，点一下才有声音（CarMode 也是这样）。 */
+#soundCard{position:fixed;z-index:7;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:rgba(6,10,16,.94);color:#fff;text-align:center;padding:24px}
+#soundCard h1{margin:0;font-size:30px;font-weight:600}
+#soundCard p{margin:0;font-size:16px;line-height:1.5;color:#8b9bb4;max-width:560px}
+#soundCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
+#soundCard .sClose{padding:11px 24px;background:rgba(255,255,255,.14);font-size:15px}
 /* CarMode 的右上角"菜单"：点开是一个白色二级面板（进入全屏 / 在车机播放声音 / 画面适应 / 断开本浏览器）。 */
 #menuBtn{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));padding:10px 18px;border:1px solid rgba(255,255,255,.16);border-radius:12px;background:rgba(20,26,38,.9);color:#fff;font-size:16px;cursor:pointer;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
 #menuPanel{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:calc(max(14px,env(safe-area-inset-top)) + 52px);width:320px;max-width:calc(100vw - 32px);padding:18px 22px;border-radius:18px;background:#fff;color:#111;text-align:left;box-shadow:0 16px 48px rgba(0,0,0,.5)}
@@ -73,6 +79,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
 </div></div>
 <div id="stats" class="badge" hidden></div>
 <div id="startCard" hidden><h1>浏览器已接入</h1><p>可在手机或浏览器开始连接。</p><button id="startBtn">开始投屏</button></div>
+<div id="soundCard" hidden><h1>声音还没开</h1><p>车机浏览器要求先点一下才能出声。点下面按钮，CarPlay 的声音就从车机喇叭播放。</p><button id="soundBtn">开启声音</button><button id="soundClose" class="sClose">暂不开启</button></div>
 <button id="startPlayback" hidden>开始播放</button>
 <script>
 /* This early check uses ES5 so even a restricted WebView can explain why playback cannot start. */
@@ -96,6 +103,9 @@ const MS=(/iPhone|iPad|iPod/.test(navigator.userAgent)&&window.ManagedMediaSourc
 const managedMSE=!!MS&&MS===window.ManagedMediaSource;
 const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');
 const startCard=$('#startCard'),startBtn=$('#startBtn');
+const soundCard=$('#soundCard'),soundBtn=$('#soundBtn'),soundClose=$('#soundClose');
+let soundDismissed=false;
+function hideSoundCard(){if(soundCard)soundCard.hidden=true;soundDismissed=true}
 // 页面接入但还没画面时给出"开始投屏"，由车机这边发起 CarPlay 会话（和 CarMode 一致）。
 function showStartCard(){if(startCard&&!shown)startCard.hidden=false;showMenu()}
 function hideStartCard(){if(startCard)startCard.hidden=true}
@@ -121,7 +131,7 @@ if(menuBtn){
   const d=document.documentElement;
   try{(d.requestFullscreen||d.webkitRequestFullscreen||function(){}).call(d)}catch(e){}
  };
- $('#miAudio').onclick=function(){menuPanel.hidden=true;ensureAudioPlayback(true)};
+ $('#miAudio').onclick=function(){menuPanel.hidden=true;soundDismissed=false;ensureAudioPlayback(true)};
  $('#miFit').onclick=function(){menuPanel.hidden=true;fitFill=!fitFill;applyFit();preference('localStorage','carwithin.fit',fitFill?'fill':'contain')};
  $('#miDisconnect').onclick=function(){
   menuPanel.hidden=true;manualStop=true;clearTimeout(retryTimer);retryTimer=0;
@@ -135,6 +145,13 @@ if(startBtn){
   send({type:'startProjection'});
   window.setTimeout(function(){if(!shown)showStartCard()},12000);
  };
+}
+if(soundBtn){
+ // 手势里创建并 resume AudioContext；Chromium 53 在无手势时会一直挂起。
+ soundBtn.onclick=function(){ensureAudioPlayback(true)};
+}
+if(soundClose){
+ soundClose.onclick=function(){hideSoundCard()};
 }
 function preference(storage,key,value){
  try{const store=window[storage];if(value===undefined)return store.getItem(key);store.setItem(key,value)}catch(e){}
@@ -213,9 +230,12 @@ const mseAudioClock=new Map(),activeAudio=new Set(),audioSchedule=new Map();
 let audioContext=null,audioOffered=false,audioPackets=[],videoStamp=null,videoStampAt=0;
 let audioGestureTimer=0;
 function audioPlaying(){return audioOffered&&audioContext&&audioContext.state==='running'}
-function canStartAudio(){return audioOffered&&shown&&(useWebCodecs||!video.paused)&&!document.hidden}
+// 车机是老版 Chromium，走的是 JPEG 兼容画面：video 元素从来不会播放，paused 永远为 true。
+// 所以这里不能用 video 状态判断，只要求"已有画面、页面在前台"——否则"开启声音"不出现，
+// 菜单里点"在车机播放声音"也会直接返回，等于完全没法出声。
+function canStartAudio(){return audioOffered&&shown&&!document.hidden}
 let audioDropped=0;
-function requestAudio(){if(receiverReady)send({type:'audio',enabled:canStartAudio()&&audioPlaying()})}
+function requestAudio(){if(receiverReady)send({type:'audio',enabled:audioPlaying()})}
 function clearAudio(){
  audioPackets=[];audioSchedule.clear();audioDropped=0;videoStamp=null;mseAudioClock.clear();
  for(const source of activeAudio){try{source.stop()}catch(e){}}
@@ -224,15 +244,15 @@ function clearAudio(){
 function audioStateChanged(){
  clearTimeout(audioGestureTimer);audioGestureTimer=0;
  requestAudio();
- if(!canStartAudio()||!audioContext||audioPlaying()){
-  enableAudio.hidden=true;
- }else if(enableAudio.hidden){
-  // resume() can stay pending until the browser receives a user gesture.
-  audioGestureTimer=setTimeout(()=>{enableAudio.hidden=!canStartAudio()||audioPlaying()},300);
- }
+ const want=canStartAudio()&&!audioPlaying();
+ enableAudio.hidden=!want;
+ if(soundCard)soundCard.hidden=!want||soundDismissed;
+ const item=$('#miAudio');
+ if(item)item.textContent=audioPlaying()?'在车机播放声音 · 已开启':'在车机播放声音';
 }
-function ensureAudioPlayback(fromGesture=false){
- if(!canStartAudio()||!AudioContextClass){audioStateChanged();return}
+function ensureAudioPlayback(fromGesture){
+ if(!AudioContextClass){audioStateChanged();return}
+ if(!fromGesture&&!canStartAudio()){audioStateChanged();return}
  try{
   if(!audioContext){
    audioContext=new AudioContextClass();
@@ -435,7 +455,8 @@ setInterval(ping,1000);
 function firstFrame(){
  if(shown)return;shown=true;attempt=0;hold.hidden=true;clearTimeout(firstFrameTimer);hideStartCard();
  if(fmt)setStatus(`CarPlay ${fmt.width}×${fmt.height} · ${fmt.fps} · ${fmt.name} · ${connectionProtocol}`,'ok');wake();
- if(useWebCodecs)ensureAudioPlayback();
+ // JPEG 兼容模式也要试着开声音：能做到就自动出声，做不到就把"开启声音"页推出来。
+ ensureAudioPlayback();
 }
 function tryMSE(m,reason){
  if(!useWebCodecs||!canMSE||!MS.isTypeSupported('video/mp4; codecs="'+m.codec+'"'))return false;

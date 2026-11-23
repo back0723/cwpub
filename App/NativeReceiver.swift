@@ -118,7 +118,12 @@ final class NativeReceiver {
         videoOutput.onDisplay = { [weak self] display, viewerID in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let display, display.height >= 500 { self.headUnitScreen = display }
+                if let display, display.height >= 500,
+                   display.width * display.height > (self.headUnitScreen.map { $0.width * $0.height } ?? 0) {
+                    // 桌面上也打开接收页时，先接上的小窗口（比如 Edge 1358×610）不能抢走主屏；
+                    // 车机 1922×858 面积更大，等它上报后按它建立会话。
+                    self.headUnitScreen = display
+                }
                 self.onBrowserDisplay?(display, viewerID)
             }
         }
@@ -217,11 +222,15 @@ final class NativeReceiver {
         }
         let generation = self.generation
         let deadline = Date().addingTimeInterval(25)
+        // 桌上电脑也开着接收页时，它往往先连上（Edge 1358×610）。给它几秒宽限，等车机
+        // 那种大屏（≥1600 宽、≥700 高）上报后再建会话，免得按小窗口的画面尺寸开局。
+        let grace = Date().addingTimeInterval(4)
         self.log("等待车机网页上报全屏尺寸后再建立 CarPlay 会话（最多 25 秒；车机先打开接收页会更快）")
         func attempt() {
             guard self.generation == generation else { return }
             let reported = self.headUnitScreen
-            if let reported, reported.height >= 500 {
+            if let reported, reported.height >= 500,
+               reported.width >= 1600 || Date() > grace {
                 var updated = configuration
                 updated.width = reported.width; updated.height = reported.height
                 self.queue.async { [weak self] in
