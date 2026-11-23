@@ -1,0 +1,48 @@
+name: build-latest
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 还原 MFi 身份
+        env:
+          P7B: ${{ secrets.IDENTITY_P7B }}
+          CER: ${{ secrets.IDENTITY_CER }}
+          X963: ${{ secrets.IDENTITY_X963 }}
+        run: |
+          mkdir -p App/BundledIdentity
+          python3 -c "import base64,sys;open('App/BundledIdentity/certificate.p7b','wb').write(base64.b64decode(sys.argv[1]))" "$P7B"
+          python3 -c "import base64,sys;open('App/BundledIdentity/leaf.cer','wb').write(base64.b64decode(sys.argv[1]))" "$CER"
+          python3 -c "import base64,sys;open('App/BundledIdentity/private.x963','wb').write(base64.b64decode(sys.argv[1]))" "$X963"
+          ls -l App/BundledIdentity
+
+      - name: 环境
+        run: xcodebuild -version
+
+      - name: 生成工程
+        run: python3 Tools/generate_project.py
+
+      - name: 编译
+        run: |
+          set -o pipefail
+          xcodebuild -project TDSCarKit.xcodeproj -scheme TDSCarKit -sdk iphoneos \
+            -configuration Release -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" build 2>&1 | tail -150
+
+      - name: 打包 IPA
+        if: success()
+        run: |
+          mkdir -p out/Payload
+          cp -R build/Build/Products/Release-iphoneos/TDSCarKit.app out/Payload/
+          cd out && zip -qry CarWithin-JPEG-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: CarWithin-JPEG-unsigned-ipa
+          path: out/CarWithin-JPEG-unsigned.ipa
