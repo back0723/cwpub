@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.4.0-startbutton"
+    static let version = "1.5.0-menu"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -39,6 +39,12 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
 #startCard h1{margin:0;font-size:34px;font-weight:600}
 #startCard p{margin:0;font-size:16px;color:#8b9bb4}
 #startCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
+/* CarMode 的右上角"菜单"：点开是一个白色二级面板（进入全屏 / 在车机播放声音 / 画面适应 / 断开本浏览器）。 */
+#menuBtn{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));padding:10px 18px;border:1px solid rgba(255,255,255,.16);border-radius:12px;background:rgba(20,26,38,.9);color:#fff;font-size:16px;cursor:pointer;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px)}
+#menuPanel{position:fixed;z-index:8;right:max(16px,env(safe-area-inset-right));top:calc(max(14px,env(safe-area-inset-top)) + 52px);width:320px;max-width:calc(100vw - 32px);padding:18px 22px;border-radius:18px;background:#fff;color:#111;text-align:left;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+#menuPanel .miTitle{font-size:14px;color:#8a8a90;margin:0 0 6px}
+#menuPanel .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:12px 0;font:inherit;font-size:17px;font-weight:600;color:#111;cursor:pointer}
+#menuPanel .miNote{margin:12px 0 0;font-size:13px;line-height:1.55;color:#6b6b70}
 #top{position:fixed;z-index:3;left:16px;right:16px;top:14px;left:max(16px,env(safe-area-inset-left));right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
 .badge{padding:9px 13px;border-radius:14px;background:rgba(18,24,36,.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font-size:14px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9f0a;margin-right:8px}.ok .dot{background:#30d158}.bad .dot{background:#ff453a}
 .toolbar{display:flex;flex-direction:column;align-items:flex-end;gap:8px}.actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.actions>*{white-space:nowrap}button,a.chip{pointer-events:auto;border:0;border-radius:13px;padding:9px 13px;background:rgba(18,24,36,.82);color:#fff;font:inherit;font-size:14px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer;text-decoration:none}
@@ -53,6 +59,15 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;ins
 </head>
 <body><main><video id="video" muted autoplay playsinline disablepictureinpicture disableremoteplayback></video><canvas id="view" hidden></canvas><canvas id="hold" hidden></canvas><div id="touch"></div></main>
 <div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 CarWithin…</span></div><div class="toolbar">
+  <button id="menuBtn" hidden>菜单</button>
+  <div id="menuPanel" hidden>
+    <p class="miTitle">浏览器已接入</p>
+    <button class="mi" id="miFull">进入全屏</button>
+    <button class="mi" id="miAudio">在车机播放声音</button>
+    <button class="mi" id="miFit">画面适应 · 保持比例</button>
+    <button class="mi" id="miDisconnect">断开本浏览器</button>
+    <p class="miNote">点击开启网页声音。要改用手机扬声器，请在 iPhone 控制中心选择 iPhone。</p>
+  </div>
   <div class="actions"><a id="fast" class="chip" hidden>配置 HTTPS</a><button id="statsButton">统计</button><button id="full">全屏</button></div>
   <button id="enableAudio" hidden>开启声音</button>
 </div></div>
@@ -82,8 +97,38 @@ const managedMSE=!!MS&&MS===window.ManagedMediaSource;
 const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');
 const startCard=$('#startCard'),startBtn=$('#startBtn');
 // 页面接入但还没画面时给出"开始投屏"，由车机这边发起 CarPlay 会话（和 CarMode 一致）。
-function showStartCard(){if(startCard&&!shown)startCard.hidden=false}
+function showStartCard(){if(startCard&&!shown)startCard.hidden=false;showMenu()}
 function hideStartCard(){if(startCard)startCard.hidden=true}
+// 菜单按钮：页面一接上就出现（CarMode 那样，待机页也能点开）。
+const menuBtn=$('#menuBtn'),menuPanel=$('#menuPanel');
+function showMenu(){if(menuBtn)menuBtn.hidden=false}
+let manualStop=false,fitFill=preference('localStorage','carwithin.fit')==='fill';
+function applyFit(){
+ const v=fitFill?'fill':'contain';
+ if(video)video.style.objectFit=v;
+ if(view)view.style.objectFit=v;
+ const item=$('#miFit');
+ if(item)item.textContent=fitFill?'画面适应 · 铺满屏幕':'画面适应 · 保持比例';
+}
+applyFit();
+if(menuBtn){
+ menuBtn.onclick=function(e){e.stopPropagation();menuPanel.hidden=!menuPanel.hidden};
+ document.addEventListener('click',function(e){
+  if(!menuPanel.hidden&&!menuPanel.contains(e.target)&&e.target!==menuBtn)menuPanel.hidden=true;
+ });
+ $('#miFull').onclick=function(){
+  menuPanel.hidden=true;
+  const d=document.documentElement;
+  try{(d.requestFullscreen||d.webkitRequestFullscreen||function(){}).call(d)}catch(e){}
+ };
+ $('#miAudio').onclick=function(){menuPanel.hidden=true;ensureAudioPlayback(true)};
+ $('#miFit').onclick=function(){menuPanel.hidden=true;fitFill=!fitFill;applyFit();preference('localStorage','carwithin.fit',fitFill?'fill':'contain')};
+ $('#miDisconnect').onclick=function(){
+  menuPanel.hidden=true;manualStop=true;clearTimeout(retryTimer);retryTimer=0;
+  try{ws.close()}catch(e){}
+  shown=false;setStatus('已断开本浏览器，刷新页面可重新连接','bad');
+ };
+}
 if(startBtn){
  startBtn.onclick=function(){
   hideStartCard();setStatus('已请求开始投屏，正在连接 CarPlay…');
@@ -322,6 +367,7 @@ function teardown(){
 }
 function restart(reason,notify=true){
  if(retryTimer)return;
+ if(manualStop){setStatus('已断开本浏览器，刷新页面可重新连接','bad');return}
  if(notify)report('error',reason);
  holdFrame();teardown();
  // Exponential backoff with ±20% jitter so several viewers do not reconnect in lockstep.
@@ -351,7 +397,7 @@ function connect(){
  ws.onopen=()=>{
   ping();
   const ready=()=>{
-   receiverReady=true;setStatus('已连接，正在等待画面');
+   receiverReady=true;setStatus('已连接，正在等待画面');showMenu();
    // 会话已经在跑（页面马上会收到 format）就不弹"开始投屏"，否则给一个发起入口。
    window.setTimeout(function(){if(!fmt&&!shown)showStartCard()},1200);
    const decoder=useJPEG?'jpeg':useWebCodecs?'webcodecs':'mse';
