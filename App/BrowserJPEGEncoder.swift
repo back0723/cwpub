@@ -29,7 +29,7 @@ final class BrowserJPEGEncoder {
     private var pendingKeyframe = false
     private var pts: Int64 = 0
     private var lastErrorUs: UInt64 = 0
-    private let ciContext = CIContext(options: [kCIContextUseSoftwareRenderer: false])
+    private let ciContext = CIContext(options: [CIContextOption.useSoftwareRenderer: false])
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
     /// JPEG quality, 0...1. Lower keeps an old phone fast and the LAN stream small.
     private let quality: NSNumber
