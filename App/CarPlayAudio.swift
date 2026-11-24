@@ -324,51 +324,73 @@ final class CarPlayAudio {
 /// Converts one authenticated RTP payload to native Float32 PCM.
 /// AAC payloads are raw access units, not ADTS containers.
 final class NativeAudioDecoder {
+    struct Attempt {
+        let name: String
+        let formatID: AudioFormatID
+        let flags: UInt32
+        let cookie: Data?
+        let framesPerPacket: UInt32
+    }
     let output: AVAudioFormat
     private let format: ReceiverAudioFormat
     private var converter: AVAudioConverter?
     private var compressed: AVAudioFormat?
-    /// iPhone 传来的 AAC 有可能是 AAC-LC，也有可能是 AAC-ELD（无线 CarPlay 常用）。
-    /// AudioSpecificConfig 写错会被 AudioToolbox 直接判成 paramErr(-50)，所以按顺序试。
-    private var cookieVariants: [Data?] = []
-    private var cookieIndex = 0
+    /// 车机端拿到的 AAC 既可能是 AAC-LC（1024 样点/帧），也可能是 CarPlay 常用的 AAC-ELD
+    /// （512 样点/帧，格式 ID 是 'eld ' 而不是 'aac '）。之前一直在 LC 的格式 ID 上换 cookie，
+    /// 这件事本身没有意义，所以永远只得到 paramErr(-50)。这里把格式 ID、flags、cookie 一起换着试。
+    private var attempts: [Attempt] = []
+    private var attemptIndex = 0
+    private var loggedPreview = false
     var onLog: ((String) -> Void)?
     init(format: ReceiverAudioFormat) throws {
         self.format = format
         output = AVAudioFormat(standardFormatWithSampleRate: Double(format.sampleRate), channels: AVAudioChannelCount(format.channels))!
         if format.isAAC {
-            let frequency: [UInt8] = format.sampleRate == 44100 ? [0x12, 0x10] : [0x11, 0x90]
-            let elt: [UInt8] = format.sampleRate == 44100 ? [0x9D, 0x08] : [0x9C, 0x88]
-            cookieVariants = [Data(frequency), Data(elt), nil]
+            let frequency: [UInt8] = format.sampleRate == 48000 ? [0x11, 0x90] : [0x12, 0x10]
+            let elt: [UInt8] = format.sampleRate == 48000 ? [0x9C, 0x88] : [0x9D, 0x08]
+            attempts = [
+                Attempt(name: "AAC-LC 头部 2 字节", formatID: kAudioFormatMPEG4AAC, flags: 2, cookie: Data(frequency), framesPerPacket: 1024),
+                Attempt(name: "AAC-ELD（'eld ' 格式）", formatID: kAudioFormatMPEG4AAC_ELD, flags: 0, cookie: Data(elt), framesPerPacket: 512),
+                Attempt(name: "AAC-LC flags 0", formatID: kAudioFormatMPEG4AAC, flags: 0, cookie: Data(frequency), framesPerPacket: 1024),
+                Attempt(name: "AAC-LC 无头部", formatID: kAudioFormatMPEG4AAC, flags: 2, cookie: nil, framesPerPacket: 1024),
+                Attempt(name: "AAC-ELD 无头部", formatID: kAudioFormatMPEG4AAC_ELD, flags: 0, cookie: nil, framesPerPacket: 512),
+            ]
         } else if format.isOpus {
-            cookieVariants = [nil]
+            attempts = [Attempt(name: "Opus", formatID: kAudioFormatOpus, flags: 0, cookie: nil, framesPerPacket: UInt32(format.sampleRate / 50))]
         }
-        if format.isAAC || format.isOpus {
-            var description = AudioStreamBasicDescription(mSampleRate: Double(format.sampleRate), mFormatID: format.isOpus ? kAudioFormatOpus : kAudioFormatMPEG4AAC,
-                mFormatFlags: format.isOpus ? 0 : 2, mBytesPerPacket: 0, mFramesPerPacket: format.isOpus ? UInt32(format.sampleRate / 50) : 1024, mBytesPerFrame: 0,
-                mChannelsPerFrame: UInt32(format.channels), mBitsPerChannel: 0, mReserved: 0)
-            guard let input = AVAudioFormat(streamDescription: &description), let codec = AVAudioConverter(from: input, to: output) else {
-                throw ProtocolError.malformed("\(format.name) 解码器不可用")
-            }
-            if let cookie = cookieVariants.first ?? nil { codec.magicCookie = cookie }
-            codec.primeMethod = .none
-            compressed = input; converter = codec
+        if !attempts.isEmpty {
+            do { try apply(attempts[0]) } catch { throw error }
         }
     }
 
-    /// 当前 cookie 解不出来时换下一个（LC → ELD → 不带头）。
-    private func advanceCookie() -> Bool {
-        guard format.isAAC, cookieIndex + 1 < cookieVariants.count, let compressed else { return false }
-        cookieIndex += 1
-        var description = AudioStreamBasicDescription(mSampleRate: Double(format.sampleRate), mFormatID: kAudioFormatMPEG4AAC,
-            mFormatFlags: 2, mBytesPerPacket: 0, mFramesPerPacket: 1024, mBytesPerFrame: 0,
+    private func apply(_ attempt: Attempt) throws {
+        var description = AudioStreamBasicDescription(mSampleRate: Double(format.sampleRate), mFormatID: attempt.formatID,
+            mFormatFlags: attempt.flags, mBytesPerPacket: 0, mFramesPerPacket: attempt.framesPerPacket, mBytesPerFrame: 0,
             mChannelsPerFrame: UInt32(format.channels), mBitsPerChannel: 0, mReserved: 0)
-        guard let input = AVAudioFormat(streamDescription: &description), let codec = AVAudioConverter(from: input, to: output) else { return false }
-        if let cookie = cookieVariants[cookieIndex] { codec.magicCookie = cookie }
+        guard let input = AVAudioFormat(streamDescription: &description) else {
+            throw ProtocolError.malformed("\(attempt.name) 输入格式不可用")
+        }
+        guard let codec = AVAudioConverter(from: input, to: output) else {
+            throw ProtocolError.malformed("\(attempt.name) 解码器不可用")
+        }
+        if let cookie = attempt.cookie { codec.magicCookie = cookie }
         codec.primeMethod = .none
-        self.compressed = input; converter = codec
-        onLog?("AAC 解码改用第 \(cookieIndex + 1) 种配置（\(cookieIndex == 1 ? "ELD" : "无头部")）")
-        return true
+        compressed = input; converter = codec
+    }
+
+    /// 当前配置解不出来时换下一种（格式 ID / flags / cookie 一起换）。
+    private func advance() -> Bool {
+        guard attemptIndex + 1 < attempts.count else { return false }
+        attemptIndex += 1
+        let attempt = attempts[attemptIndex]
+        do {
+            try apply(attempt)
+            onLog?("音频解码改用第 \(attemptIndex + 1) 种：\(attempt.name)")
+            return true
+        } catch {
+            onLog?("音频解码第 \(attemptIndex + 1) 种（\(attempt.name)）不可用：\(error.localizedDescription)")
+            return false
+        }
     }
 
     func decode(_ payload: Data) throws -> AVAudioPCMBuffer? {
@@ -377,7 +399,12 @@ final class NativeAudioDecoder {
             do {
                 return try decodeOnce(payload)
             } catch {
-                if advanceCookie() { continue }
+                if !loggedPreview {
+                    loggedPreview = true
+                    let head = payload.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
+                    onLog?("音频包头部 \(head)（\(payload.count) 字节）：\(error.localizedDescription)")
+                }
+                if advance() { continue }
                 throw error
             }
         }
