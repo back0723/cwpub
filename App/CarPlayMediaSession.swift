@@ -60,8 +60,11 @@ final class CarPlayMediaSession {
                         && ((stream["input"] as? Bool) == true || (stream["dataPort"] as? NSNumber)?.intValue ?? 0 > 0)
                     let microphonePort = requestsMicrophone ? (stream["dataPort"] as? NSNumber).flatMap { UInt16(exactly: $0.intValue) }.flatMap { $0 > 0 ? $0 : nil } : nil
                     audio.removeValue(forKey: type.intValue)?.stop()
+                    // 通话/语音流（telephony / speechrecognition）标记 isVoice：
+                    // CarPlayAudio 据此在本机绝不抢 AVAudioSession 路由，避免顶断微信通话。
+                    let isVoice = ["telephony", "speechrecognition"].contains(audioType)
                     let output = try CarPlayAudio(secret: secret, peerAddress: peerAddress,
-                        connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort)
+                        connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort, isVoice: isVoice)
                     output.onLog = { [weak self] in self?.onLog?($0) }
                     output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
                     let streamType = type.intValue
