@@ -1915,7 +1915,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     @objc private func copyLog() { UIPasteboard.general.string = lines.joined(separator: "\n") }
     private func log(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        lines.append("\(timestamp)  \(message)"); if lines.count > 200 { lines.removeFirst(lines.count - 200) }
+        lines.append("\(timestamp)  \(message)"); if lines.count > 500 { lines.removeFirst(lines.count - 500) }
         if logView.window != nil {
             logView.text = lines.joined(separator: "\n")
             if !logView.text.isEmpty { logView.scrollRangeToVisible(NSRange(location: logView.text.utf16.count - 1, length: 1)) }
@@ -1974,7 +1974,14 @@ extension ReceiverViewController {
         httpsTokenField.addTarget(self, action: #selector(saveHTTPSFields), for: .editingDidEnd)
         passwordField.textContentType = .password
         ipField.keyboardType = .decimalPad
-        let legacyPiPEnabled = defaults.object(forKey: "pictureInPictureEnabled") as? Bool ?? true
+        // 画中画默认关闭：升级后旧值不再自动沿用，除非用户明确重新选择过时机。
+        // didSetPiPDefaultOffV1 标记保证只迁移一次，迁移后仍完全尊重用户后续选择。
+        let legacyPiPEnabled = defaults.object(forKey: "pictureInPictureEnabled") as? Bool ?? false
+        if !defaults.bool(forKey: "didSetPiPDefaultOffV1") {
+            defaults.set(false, forKey: "pictureInPictureEnabled")
+            defaults.set(0, forKey: "pictureInPictureTiming")
+            defaults.set(true, forKey: "didSetPiPDefaultOffV1")
+        }
         pictureInPictureTiming.selectedSegmentIndex = defaults.object(forKey: "pictureInPictureTiming") as? Int ?? (legacyPiPEnabled ? 1 : 0)
         pictureInPictureTiming.addTarget(self, action: #selector(pictureInPictureTimingChanged), for: .valueChanged)
         keepAliveSwitch.isOn = defaults.object(forKey: "backgroundKeepAlive") as? Bool ?? true
@@ -2283,13 +2290,7 @@ extension ReceiverViewController {
                     .control("画中画开启时机", icon: ("pip.fill", .systemIndigo), pictureInPictureTiming)
                 ]),
                 SettingsSection("支持", [
-                    .externalLink("关注作者", icon: ("heart.fill", .systemRed), detail: "抖音") {
-                        UIApplication.shared.open(Self.authorURL)
-                    },
-                    .externalLink("请我喝杯咖啡", icon: ("cup.and.saucer.fill", .systemOrange), detail: "支付宝") {
-                        UIApplication.shared.open(Self.supportURL)
-                    },
-                    .page("诊断与实验", icon: ("stethoscope", .systemTeal)) { [unowned self] in self.diagnosticsPage() },
+                    .page("日志", icon: ("doc.text.fill", .systemGray)) { [unowned self] in self.logPage() },
                     .page("关于", icon: ("info.circle.fill", .systemGray)) { [unowned self] in self.aboutPage() }
                 ])
             ]
@@ -2895,7 +2896,7 @@ extension ReceiverViewController {
     fileprivate func logPage() -> SettingsPageController {
         let controller = page("日志") { [unowned self] in
             [
-                SettingsSection(footer: "最近 200 条，不含 Wi-Fi 密码和 MFi 私钥。", [.view(logView)]),
+                SettingsSection(footer: "最近 500 条轮转，不含 Wi-Fi 密码和 MFi 私钥。", [.view(logView)]),
                 SettingsSection([.action("复制日志", icon: ("doc.on.doc.fill", .systemBlue)) { [unowned self] in
                     self.copyLog(); self.alert("已复制", "日志已复制到剪贴板。")
                 }])
