@@ -130,7 +130,7 @@ final class CarPlayMediaSession {
                     switch route {
                     case .music: routeText = "音乐→车机通道3"
                     case .navigation: routeText = "导航→车机通道4(TTS)"
-                    case .voice: routeText = "通话→本机蓝牙/听筒(不送车机)"
+                    case .voice: routeText = "通话→对方声音送车机通道3(音乐/导航暂停)"
                     }
                     onLog?("音频流 \(type) 已就绪：\(format.name) \(format.sampleRate) Hz / \(format.channels) 声道，audioType=\(audioType.isEmpty ? "无" : audioType)，\(routeText)")
                     continue
