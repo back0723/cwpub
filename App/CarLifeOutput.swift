@@ -852,6 +852,11 @@ private final class Session {
     private var voiceInitLink: ObjectIdentifier?
     private var voicePlayed = false
     private var lastVoiceReport = DispatchTime(uptimeNanoseconds: 0)
+    private var lastVoicePlayAt = DispatchTime(uptimeNanoseconds: 0)
+    private var voiceFrames = 0
+    /// 导航播报期间把音乐压到正常音量的 70%（App 侧缩放 PCM，不依赖车机 setVolume）。
+    private var duckMusicUntil = DispatchTime(uptimeNanoseconds: 0)
+    private var loggedDucking = false
 
     private var audioLink: Link? {
         // 车机只在通道 3 上认音乐消息；通道没建时不要往别的通道乱发。
@@ -870,9 +875,17 @@ private final class Session {
         // 【停播后仍响】先做静音检测，静音帧绝不送车机：
         // iPhone 停止音乐后 CarPlay 仍持续推静音帧，若照单全收，车机 AudioTrack 会被 tick() 的
         // 定期 play 不断唤醒、重播残留缓冲 → 停播后还一直响。连续静音 1.2 秒就发一次 pause。
-        guard let pcm = Self.pcm16(buffer) else { return }
-        let peak = Self.peakPCM16(pcm)
         let nowNs = DispatchTime.now().uptimeNanoseconds
+        // 导航播报时把音乐压到 70%：App 侧直接缩放 PCM16，车机无需支持 setVolume。
+        let ducking = nowNs < duckMusicUntil.uptimeNanoseconds
+        guard var pcm = Self.pcm16(buffer) else { return }
+        if ducking { Self.scalePCM16(&pcm, 0.7) }
+        if ducking && !loggedDucking {
+            loggedDucking = true
+            log?("CarLife 伴音：导航播报中，音乐音量压低到 70%")
+        }
+        if !ducking { loggedDucking = false }
+        let peak = Self.peakPCM16(pcm)
         if peak < 64 {
             // 【闪退修复】silentSince 必须在这里就用当前时刻落定，不能晚于 nowNs：
             // 之前先算 nowNs 再 silentSince = .now()，两者先后两个采样点，若 since > nowNs，
@@ -958,9 +971,10 @@ private final class Session {
             audioInitLink = nil; audioPlayed = false; pausedBySilence = false; silentSince = nil
             if musicPausedByCall {
                 musicPausedByCall = false
-                if audioLink != nil {
-                    send(3, MusicCommand.play); audioPlayed = true; lastPlayAt = .now()
-                }
+                // 不在这里 send play：通道3此刻还是通话的 48000/1 格式，若直接 play 会播一段
+                // 对方残音/变调。交给下一帧音乐走 audio() 的音格式检测，重新 init(44100/2)+play，
+                // 这样"因通话暂停的音乐"会在通话结束后自动、正确地继续播放。
+                audioPlayed = false
             }
             if ttsPausedByCall {
                 ttsPausedByCall = false
@@ -1007,6 +1021,8 @@ private final class Session {
         } else {
             ttsSilentSince = nil
         }
+        // 导航播报有声：接下来 1.5 秒把音乐压到 70%（连续播报每帧都会续期）。
+        duckMusicUntil = DispatchTime(uptimeNanoseconds: nowNs + 1_500_000_000)
         guard let link = ttsLink else {
             if !loggedNoTTSChannel {
                 loggedNoTTSChannel = true
@@ -1056,15 +1072,27 @@ private final class Session {
             send(3, MusicCommand.initialize, initData)
             send(3, MusicCommand.play)
             voicePlayed = true
+            voiceFrames = 0
+            lastVoicePlayAt = .now()
             voiceInitLink = linkID
             audioInitLink = linkID   // 让通话结束后的音乐发现格式变化、重新 init 回 44100/2
             log?("CarLife 通话：对方声音接管通道3 \(rate) Hz / \(channelsInBuffer) 声道（音乐/导航已暂停）")
         }
         let now = DispatchTime.now().uptimeNanoseconds
+        voiceFrames += 1
+        let peak = Self.peakPCM16(pcm)
+        // 【我听不到对方根因】车机音乐模块收到 init(48000/1) 会重建 AudioTrack，重建后停在
+        // STOPPED 态，紧跟的 play 常被忽略。音乐通道有 tick() 每 5 秒补 play，但通话只有几秒，
+        // 根本等不到 → 对方声音数据全被丢弃。这里对通话音频每 500ms 补一次 play，
+        // 保证重建后的 AudioTrack 尽快进入播放态。
+        if now >= lastVoicePlayAt.uptimeNanoseconds, now - lastVoicePlayAt.uptimeNanoseconds > 500_000_000 {
+            lastVoicePlayAt = DispatchTime(uptimeNanoseconds: now)
+            send(3, MusicCommand.play)
+        }
         lastPlayAt = .now(); lastAudioAt = .now()
-        if now >= lastVoiceReport.uptimeNanoseconds, now - lastVoiceReport.uptimeNanoseconds > 5_000_000_000 {
-            lastVoiceReport = .now()
-            log?("CarLife 通话：对方声音正在送车机（通道3）")
+        if now >= lastVoiceReport.uptimeNanoseconds, now - lastVoiceReport.uptimeNanoseconds > 1_000_000_000 {
+            lastVoiceReport = DispatchTime(uptimeNanoseconds: now)
+            log?("CarLife 通话：对方声音已送车机 \(voiceFrames) 帧，峰值 \(peak)，通道3待写 \(link.pendingBytes) 字节")
         }
         guard link.pendingBytes < 512 * 1024 else { return }
         guard send(3, MusicCommand.data, pcm) else { return }
@@ -1104,6 +1132,18 @@ private final class Session {
                 index += step
             }
             return peak
+        }
+    }
+
+    /// 就地缩放交错 PCM16 的幅度（gain<1 降低音量），用于导航播报时的音乐 ducking。
+    static func scalePCM16(_ data: inout Data, _ gain: Float) {
+        data.withUnsafeMutableBytes { raw in
+            guard let base = raw.bindMemory(to: Int16.self).baseAddress else { return }
+            let samples = raw.count / MemoryLayout<Int16>.size
+            for i in 0..<samples {
+                let scaled = Int32(Float(base[i]) * gain)
+                base[i] = Int16(max(-32768, min(32767, scaled)))
+            }
         }
     }
 
