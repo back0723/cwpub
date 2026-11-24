@@ -95,7 +95,6 @@ final class CarPlayAudio {
     init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format
         decoder = try NativeAudioDecoder(format: format)
-        decoder.onLog = { [weak self] text in self?.onLog?(text) }
         output = decoder.output
         cipher = AudioStream(secret: secret, connectionID: connectionID)
         data = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
@@ -105,6 +104,7 @@ final class CarPlayAudio {
             microphone = NativeMicrophone(secret: secret, connectionID: connectionID, address: peerAddress, port: microphonePort, format: format)
         }
         data.onPacket = { [weak self] in self?.receive($0) }
+        decoder.onLog = { [weak self] text in self?.onLog?(text) }
     }
     private func receive(_ wire: Data) {
         guard active else { return }
