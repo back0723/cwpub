@@ -579,12 +579,14 @@ final class NativeReceiver {
                     self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
                 }
                 // CarLife 车机端的伴音：把每一路解码后的 PCM 直接喂给车机的音频模块。
+                let carLifeOn = configuration.carLifeEnabled
+                let carLifeAudioOn = configuration.carLifeAudio
                 media.onAudioPCM = { [weak self] _, buffer in
                     guard let self else { return }
-                    guard self.configuration.carLifeEnabled, self.configuration.carLifeAudio else {
+                    guard carLifeOn, carLifeAudioOn else {
                         if !self.loggedCarLifeAudioBlocked {
                             self.loggedCarLifeAudioBlocked = true
-                            self.log("CarLife 伴音：音频没送去车机（CarLife 模式=\(self.configuration.carLifeEnabled ? "开" : "关")，「随画面传输」=\(self.configuration.carLifeAudio ? "开" : "关")）")
+                            self.log("CarLife 伴音：音频没送去车机（CarLife 模式=\(carLifeOn ? "开" : "关")，「随画面传输」=\(carLifeAudioOn ? "开" : "关")）")
                         }
                         return
                     }
