@@ -523,31 +523,32 @@ private final class NativeMicrophone {
             // 后台播音时系统常把会话留在 .playback（或带 .mixWithOthers），此时开录音必然
             // 报 cannotStartRecording（561145187）。录音前把会话摆回可录状态，并明确用内建麦克风。
             let session = AVAudioSession.sharedInstance()
-            // 通话正在进行时：绝不改类别（改了会把通话顶断，真机已复现“双方没声音且自己中断”）。
-            // 只有会话本来就已经是可录状态时才直接装 tap；否则等通话结束再来。
-            if session.isOtherAudioPlaying, session.category != .playAndRecord {
-                if !loggedWaitingForAudio {
-                    loggedWaitingForAudio = true
-                    onLog?("通话占用音频：先不动音频会话（避免顶断通话），通话结束后再开麦克风")
+            let callInProgress = session.isOtherAudioPlaying
+            // 【对方听不到根因】旧逻辑："通话中且会话不是 playAndRecord → 等 5 秒再试"。
+            // 但微信/电话通话期间会话一直被占用，这个条件永远成立 → 无限推迟 → 麦克风从头到尾
+            // 没启动（日志反复出现"通话结束后再开麦克风"却再也不开）。真机铁证。
+            // 新逻辑：通话中绝不改类别（改了会顶断微信），直接复用当前会话装 tap 采集；
+            // 只有"当前会话根本不可录"时才如实放弃并给一次明确提示，不再无限等待。
+            if callInProgress {
+                let recordable = session.category == .playAndRecord || session.category == .record
+                if !recordable {
+                    if !loggedWaitingForAudio {
+                        loggedWaitingForAudio = true
+                        let cats = session.category.rawValue
+                        onLog?("麦克风无法启动：通话占用且会话不可录（类别 \(cats)）。通话走 iPhone 本机时由微信/电话用自己的麦克风；若要车机侧说话，请把通话音频路由交给 YCarWith")
+                    }
+                    return
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                    guard let self, self.active, !self.installedTap else { return }
-                    self.beginCapture()
-                }
-                return
-            }
-            // 修复「对方听不到你」：通话中微信已经建立好可录会话，绝不改类别/激活，
-            // 否则会把微信通话顶断（真机就是「双方没声音且自己中断」）。直接复用现有会话装 tap。
-            if !session.isOtherAudioPlaying {
+                // 会话已可录（微信通话通常就是 playAndRecord）：直接装 tap，不改类别、不 setActive。
+            } else {
+                // 没有其它 App 占用：正常建立可录会话。
                 if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
                     try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
                 }
                 try session.setActive(true)
-            }
-            // 通话中不调 setPreferredInput：微信已经选好了输入，强改会打断它。
-            if !session.isOtherAudioPlaying,
-               let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
-                try? session.setPreferredInput(builtIn)
+                if let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                    try? session.setPreferredInput(builtIn)
+                }
             }
             if format.isOpus { opusEncoder = try NativeOpusEncoder(rate: rate) }
             let input = engine.inputNode.outputFormat(forBus: 0)
