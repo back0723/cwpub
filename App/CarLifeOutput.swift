@@ -792,6 +792,11 @@ private final class Session {
     private var channelThreeInbound = 0
     private var lastPlayAt = DispatchTime(uptimeNanoseconds: 0)
     private var lastAudioAt = DispatchTime(uptimeNanoseconds: 0)
+    /// 【停播后仍响】CarPlay 在 iPhone 停止音乐后仍持续推静音帧（日志：数据包一直涨、载荷=6 字节）。
+    /// 照单全收会让车机 AudioTrack 一直有数据、加上 tick() 每 5 秒补 play，停播后还不停重播残留缓冲。
+    /// 连续静音超过 1.2 秒就发一次 pause 并停送静音数据；再次出现有效声音时自动恢复 play。
+    private var silentSince: DispatchTime?
+    private var pausedBySilence = false
 
     private var audioLink: Link? {
         // 车机只在通道 3 上认音乐消息；通道没建时不要往别的通道乱发。
@@ -804,6 +809,32 @@ private final class Session {
         let channelsInBuffer = Int(buffer.format.channelCount)
         let rate = Int(buffer.format.sampleRate.rounded())
         guard frames > 0, channelsInBuffer > 0, rate >= 8000 else { return }
+        // 【停播后仍响】先做静音检测，静音帧绝不送车机：
+        // iPhone 停止音乐后 CarPlay 仍持续推静音帧，若照单全收，车机 AudioTrack 会被 tick() 的
+        // 定期 play 不断唤醒、重播残留缓冲 → 停播后还一直响。连续静音 1.2 秒就发一次 pause。
+        guard let pcm = Self.pcm16(buffer) else { return }
+        let peak = Self.peakPCM16(pcm)
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        if peak < 64 {
+            if silentSince == nil { silentSince = .now() }
+            if !pausedBySilence, let since = silentSince, nowNs - since.uptimeNanoseconds > 1_200_000_000 {
+                send(3, MusicCommand.pause)
+                pausedBySilence = true
+                audioPlayed = false
+                log?("CarLife 伴音：iPhone 已停止播放（持续静音），已暂停车机播放")
+            }
+            return
+        }
+        if pausedBySilence {
+            send(3, MusicCommand.play)
+            pausedBySilence = false
+            silentSince = nil
+            audioPlayed = true
+            lastPlayAt = .now()
+            log?("CarLife 伴音：声音恢复，已重新播放")
+        } else {
+            silentSince = nil
+        }
         guard let link = audioLink else {
             if !loggedNoAudioChannel {
                 loggedNoAudioChannel = true
@@ -835,7 +866,6 @@ private final class Session {
             send(3, MusicCommand.play); audioPlayed = true; lastPlayAt = .now()
         }
         lastAudioAt = .now()
-        guard let pcm = Self.pcm16(buffer) else { return }
         // 车机端写入跟不上就丢这一小段，别把整条连接堵死。
         guard link.pendingBytes < 512 * 1024 else { return }
         guard send(3, MusicCommand.data, pcm) else { return }
@@ -861,6 +891,25 @@ private final class Session {
         return data
     }
 
+    /// 取 PCM16 交错数据的峰值绝对值（采样一部分帧即可），用于判断是否静音。
+    static func peakPCM16(_ data: Data) -> Int {
+        data.withUnsafeBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            guard bytes.count >= 2 else { return 0 }
+            var peak = 0
+            let totalFrames = bytes.count / 2
+            let step = max(1, totalFrames / 256)
+            var index = 0
+            while index < totalFrames {
+                let sample = Int16(bitPattern: UInt16(bytes[index * 2]) << 8 | UInt16(bytes[index * 2 + 1]))
+                let magnitude = sample == Int16.min ? 32768 : (sample < 0 ? -Int(sample) : Int(sample))
+                if magnitude > peak { peak = magnitude }
+                index += step
+            }
+            return peak
+        }
+    }
+
     func tick() {
         guard active, profile != nil else { return }
         let now = DispatchTime.now().uptimeNanoseconds
@@ -878,7 +927,8 @@ private final class Session {
             log?("CarLife 伴音：已送 \(seconds) 秒音频，通道3\(audioLink == nil ? "未建立" : "已建立")，待写 \(audioLink?.pendingBytes ?? 0) 字节")
         }
         // 有些车机把最早的 play 吞掉后一直停在“已初始化未播放”，定期补一次（不会打断正在播的）。
-        if audioRate > 0, audioLink != nil, now - lastPlayAt.uptimeNanoseconds >= 5_000_000_000 {
+        // 但如果正处于静音暂停态，绝不能补 play——那会把车机从 pause 唤醒、重播残留缓冲。
+        if audioRate > 0, !pausedBySilence, audioLink != nil, now - lastPlayAt.uptimeNanoseconds >= 5_000_000_000 {
             lastPlayAt = .now()
             send(3, MusicCommand.play)
         }
