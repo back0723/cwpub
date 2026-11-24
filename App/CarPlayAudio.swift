@@ -58,6 +58,7 @@ final class CarPlayAudio {
     private let output: AVAudioFormat
     private let decoder: NativeAudioDecoder
     private var microphone: NativeMicrophone?
+    private var microphoneStarted = false
     private var queuedFrames = 0
     private var active = true
     private var playing = false
@@ -127,6 +128,16 @@ final class CarPlayAudio {
             guard let buffer = try decoder.decode(packet.samples) else { return }
             decodedPackets += 1
             onPCM?(buffer)
+            // 【对方听不到根因】通话流(isVoice)在 CarLife 模式下 shouldForwardAudio 恒 true，
+            // 会在下面 onBrowserAudio 分支直接 return，永远走不到旧代码里"本机播放分支"的
+            // microphone.start() —— 上行麦克风从未启动，对方自然听不到。
+            // 这里把麦克风启动独立出来：只要通话流真的收到对方声音，就启动上行采集，
+            // 与本机是否播放、是否转发网页无关。只启动一次。
+            if let microphone, isVoice, !microphoneStarted {
+                microphoneStarted = true
+                microphone.onLog = onLog
+                DispatchQueue.main.async { microphone.start() }
+            }
             // 只有在车机页面上真的有人在要声音时才转发；没人要就让下面的本地播放跑起来，
             // 不然这条音频包会被转发到一个不存在的听众那里，手机和车机同时没声音。
             if let onBrowserAudio, shouldForwardAudio?() ?? true {
@@ -225,10 +236,7 @@ final class CarPlayAudio {
                     throw error
                 }
                 playing = true; Self.playingStreams += 1
-                if let microphone {
-                    microphone.onLog = onLog
-                    DispatchQueue.main.async { microphone.start() }
-                }
+                // 麦克风已改为在 receive() 里独立启动（见上），这里不再重复启动。
                 firstTimestamp = packet.timestamp
                 onLog?("原生 \(format.name) 播放已开始：\(format.sampleRate) Hz，\(format.channels) 声道")
                 #if os(iOS)
