@@ -590,12 +590,15 @@ final class NativeReceiver {
                 media.onAudioPCM = { [weak self] frame in
                     guard let self else { return }
                     if frame.route == .voice {
-                        // 电话/微信语音：不送车机，且暂停车机音乐/导航，通话停止后自动恢复。
+                        // 电话/微信语音：iPhone 已把通话音频路由给 CarPlay，本机听筒不响，
+                        // 必须把对方声音送车机通道3播出来，否则「听不到对方」。
+                        // 同时暂停车机音乐/导航，通话里不会混入其它声音。
                         self.carLife.setCallActive(true)
+                        self.carLife.appendVoiceAudio(frame.buffer)
                         self.voiceReleaseWork?.cancel()
                         let work = DispatchWorkItem { [weak self] in self?.carLife.setCallActive(false) }
                         self.voiceReleaseWork = work
-                        self.queue.asyncAfter(deadline: .now() + 1.2, execute: work)
+                        self.queue.asyncAfter(deadline: .now() + 2.0, execute: work)
                         return
                     }
                     guard carLifeOn, carLifeAudioOn else {
