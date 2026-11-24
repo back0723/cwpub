@@ -332,7 +332,7 @@ final class NativeAudioDecoder {
         if format.isAAC {
             let frequency = format.sampleRate == 44100 ? [0x12, 0x10] : [0x11, 0x90]
             let elt = format.sampleRate == 44100 ? [0x9D, 0x08] : [0x9C, 0x88]
-            cookieVariants = [frequency, elt, nil]
+            cookieVariants = [Data(frequency), Data(elt), nil]
         } else if format.isOpus {
             cookieVariants = [nil]
         }
