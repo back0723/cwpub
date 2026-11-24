@@ -95,6 +95,7 @@ final class CarPlayAudio {
     init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format
         decoder = try NativeAudioDecoder(format: format)
+        decoder.onLog = { [weak self] text in self?.onLog?(text) }
         output = decoder.output
         cipher = AudioStream(secret: secret, connectionID: connectionID)
         data = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
@@ -320,9 +321,21 @@ final class NativeAudioDecoder {
     private let format: ReceiverAudioFormat
     private var converter: AVAudioConverter?
     private var compressed: AVAudioFormat?
+    /// iPhone 传来的 AAC 有可能是 AAC-LC，也有可能是 AAC-ELD（无线 CarPlay 常用）。
+    /// AudioSpecificConfig 写错会被 AudioToolbox 直接判成 paramErr(-50)，所以按顺序试。
+    private var cookieVariants: [Data?] = []
+    private var cookieIndex = 0
+    var onLog: ((String) -> Void)?
     init(format: ReceiverAudioFormat) throws {
         self.format = format
         output = AVAudioFormat(standardFormatWithSampleRate: Double(format.sampleRate), channels: AVAudioChannelCount(format.channels))!
+        if format.isAAC {
+            let frequency = format.sampleRate == 44100 ? [0x12, 0x10] : [0x11, 0x90]
+            let elt = format.sampleRate == 44100 ? [0x9D, 0x08] : [0x9C, 0x88]
+            cookieVariants = [frequency, elt, nil]
+        } else if format.isOpus {
+            cookieVariants = [nil]
+        }
         if format.isAAC || format.isOpus {
             var description = AudioStreamBasicDescription(mSampleRate: Double(format.sampleRate), mFormatID: format.isOpus ? kAudioFormatOpus : kAudioFormatMPEG4AAC,
                 mFormatFlags: format.isOpus ? 0 : 2, mBytesPerPacket: 0, mFramesPerPacket: format.isOpus ? UInt32(format.sampleRate / 50) : 1024, mBytesPerFrame: 0,
@@ -330,19 +343,46 @@ final class NativeAudioDecoder {
             guard let input = AVAudioFormat(streamDescription: &description), let codec = AVAudioConverter(from: input, to: output) else {
                 throw ProtocolError.malformed("\(format.name) 解码器不可用")
             }
-            if format.isAAC { codec.magicCookie = Data(format.sampleRate == 44100 ? [0x12, 0x10] : [0x11, 0x90]) }
+            if let cookie = cookieVariants.first ?? nil { codec.magicCookie = cookie }
             codec.primeMethod = .none
             compressed = input; converter = codec
         }
     }
+
+    /// 当前 cookie 解不出来时换下一个（LC → ELD → 不带头）。
+    private func advanceCookie() -> Bool {
+        guard format.isAAC, cookieIndex + 1 < cookieVariants.count, let compressed else { return false }
+        cookieIndex += 1
+        var description = AudioStreamBasicDescription(mSampleRate: Double(format.sampleRate), mFormatID: kAudioFormatMPEG4AAC,
+            mFormatFlags: 2, mBytesPerPacket: 0, mFramesPerPacket: 1024, mBytesPerFrame: 0,
+            mChannelsPerFrame: UInt32(format.channels), mBitsPerChannel: 0, mReserved: 0)
+        guard let input = AVAudioFormat(streamDescription: &description), let codec = AVAudioConverter(from: input, to: output) else { return false }
+        if let cookie = cookieVariants[cookieIndex] { codec.magicCookie = cookie }
+        codec.primeMethod = .none
+        self.compressed = input; converter = codec
+        onLog?("AAC 解码改用第 \(cookieIndex + 1) 种配置（\(cookieIndex == 1 ? "ELD" : "无头部")）")
+        return true
+    }
+
     func decode(_ payload: Data) throws -> AVAudioPCMBuffer? {
         guard !payload.isEmpty, payload.count <= 65507 else { throw ProtocolError.malformed("音频载荷大小") }
+        while true {
+            do {
+                return try decodeOnce(payload)
+            } catch {
+                if advanceCookie() { continue }
+                throw error
+            }
+        }
+    }
+
+    private func decodeOnce(_ payload: Data) throws -> AVAudioPCMBuffer? {
         if let converter, let compressed {
             let input = AVAudioCompressedBuffer(format: compressed, packetCapacity: 1, maximumPacketSize: payload.count)
             input.packetCount = 1; input.byteLength = UInt32(payload.count)
             payload.withUnsafeBytes { input.data.copyMemory(from: $0.baseAddress!, byteCount: payload.count) }
             input.packetDescriptions?.pointee = AudioStreamPacketDescription(mStartOffset: 0, mVariableFramesInPacket: format.isOpus ? 0 : 1024, mDataByteSize: UInt32(payload.count))
-            guard let pcm = AVAudioPCMBuffer(pcmFormat: output, frameCapacity: format.isOpus ? AVAudioFrameCount(format.sampleRate * 120 / 1000) : 1024) else { throw ProtocolError.malformed("AAC 输出缓冲区") }
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: output, frameCapacity: format.isOpus ? AVAudioFrameCount(format.sampleRate * 120 / 1000) : 4096) else { throw ProtocolError.malformed("AAC 输出缓冲区") }
             var supplied = false, error: NSError?
             let status = converter.convert(to: pcm, error: &error) { _, state in
                 if supplied { state.pointee = .noDataNow; return nil }

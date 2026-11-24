@@ -935,7 +935,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         reloadVisibleSettings()
     }
     private var browserAddress: String? {
-        ReceiverConfiguration.wifiIPv4Address()
+        ReceiverConfiguration.lanIPv4Address()
             ?? (UIDevice.current.userInterfaceIdiom == .phone ? nil : ReceiverConfiguration.localIPv4Addresses().first)
     }
     private func portNumber(_ text: String?) -> UInt16? {
@@ -1007,10 +1007,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
 
     private func refreshBrowserAddressLabels() {
-        browserURLLabel.text = browserURL ?? (browserPort == nil ? "HTTP 端口无效" : "未连接 Wi-Fi")
+        let missing = ReceiverConfiguration.personalHotspotActive ? "未连接 Wi-Fi" : "未连接 Wi-Fi（也未开启个人热点）"
+        browserURLLabel.text = browserURL ?? (browserPort == nil ? "HTTP 端口无效" : missing)
         browserCopyButton.isEnabled = browserURL != nil
-        secureBrowserURLLabel.text = secureBrowserURL ?? (browserPortError == nil ? "未连接 Wi-Fi" : "请检查 HTTPS 端口")
+        secureBrowserURLLabel.text = secureBrowserURL ?? (browserPortError == nil ? missing : "请检查 HTTPS 端口")
         secureBrowserCopyButton.isEnabled = secureBrowserURL != nil
+        refreshNetworkSummary()
     }
 
     private func refreshVideoOutputSummary() {
@@ -1253,7 +1255,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
     private func refreshNetworkSummary() {
         let name = ssidField.text ?? ""
-        if needsNetworkDetails, !name.isEmpty {
+        // 1.0.1 的提示：车机连 iPhone 热点也能直接投屏，不必先有路由器 Wi-Fi。
+        if ReceiverConfiguration.personalHotspotActive {
+            networkSummary.text = name.isEmpty
+                ? "已检测到个人热点，请先在设置中保存 Wi-Fi 配置"
+                : "已检测到个人热点，CarPlay 配置就绪"
+        } else if needsNetworkDetails, !name.isEmpty {
             networkSummary.text = "CarPlay Wi-Fi 预设：\(name)"
         } else if needsNetworkDetails {
             networkSummary.text = "请在设置中添加或选择 Wi-Fi 预设。"
@@ -1502,6 +1509,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             return
         }
         guard let identity else { return }
+        if let hotspot = ReceiverConfiguration.hotspotIPv4Address() {
+            log("已检测到个人热点 \(hotspot)：车机加入这个热点后，用 http://\(hotspot):\(browserPort ?? 9888) 访问")
+        }
         let addresses = ReceiverConfiguration.localIPv4Addresses()
         if !addresses.contains(ipField.text ?? "") { ipField.text = browserAddress ?? addresses.first }
         var config = ReceiverConfiguration(name: nameField.text ?? "YCarWith", address: ipField.text ?? "",
@@ -1555,7 +1565,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     private var localCarPlayAddress: String? {
-        outputMode.usesInstrumentWiFi ? ReceiverConfiguration.wifiIPv4Address() : browserAddress
+        outputMode.usesInstrumentWiFi ? ReceiverConfiguration.lanIPv4Address() : browserAddress
     }
 
     private func refreshNetworkAddresses() {
@@ -2111,11 +2121,11 @@ extension ReceiverViewController {
     private func usagePage() -> SettingsPageController {
         page("使用说明") {
             [
-                SettingsSection("1. 先连 Wi-Fi", [
-                    .guide("让 iPhone 加入 Wi-Fi", icon: ("wifi", .systemBlue),
-                           "路由器、车机 Wi-Fi 或另一台手机的热点都可以。有网、没网都能投屏。运行 YCarWith 的 iPhone 需要实际加入 Wi-Fi，自己开热点不能代替这一步。"),
+                SettingsSection("1. 先连网络", [
+                    .guide("让 iPhone 加入 Wi-Fi，或直接开个人热点", icon: ("wifi", .systemBlue),
+                           "路由器、车机 Wi-Fi 或另一台手机的热点都可以，也可以干脆用这台 iPhone 自己开个人热点：车机连上这个热点后，用首页显示的 172.20.10.x 地址访问即可。"),
                     .guide("选择同名预设", icon: ("list.bullet", .systemBlue),
-                           "回到 YCarWith，在「Wi-Fi 预设」选择刚连的网络。第一次用，在「Wi-Fi 与网络」添加。")
+                           "回到 YCarWith，在「Wi-Fi 预设」选择刚连的网络。第一次用，在「Wi-Fi 与网络」添加。热点模式下没有可加入的网络名，留空也能启动。")
                 ]),
                 SettingsSection("2. 选一种输出", [
                     .guide("浏览器", icon: ("globe", .systemTeal),
