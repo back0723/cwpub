@@ -23,6 +23,10 @@ final class CarPlayMediaSession {
     private var videoPackets = 0
     var onLog: ((String) -> Void)?
     var onBrowserAudio: ((Int, AVAudioPCMBuffer, UInt64) -> Void)?
+    /// 每一路音频（含通话）解码后的 PCM，用来喂 CarLife 车机端的伴音通道。
+    var onAudioPCM: ((Int, AVAudioPCMBuffer) -> Void)?
+    /// 车机页面上有没有人在要声音；没人要时音频留给本机播放（CarLife 模式就是这种情况）。
+    var browserAudioWanted: (() -> Bool)?
     var onVideo: ((Data, VideoCodec) -> Void)?
     init(queue: DispatchQueue, secret: SymmetricKey, peerAddress: String, audioEnabled: Bool, hevc: Bool) {
         self.queue = queue; self.secret = secret; self.peerAddress = peerAddress
@@ -59,9 +63,14 @@ final class CarPlayMediaSession {
                     let output = try CarPlayAudio(secret: secret, peerAddress: peerAddress,
                         connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort)
                     output.onLog = { [weak self] in self?.onLog?($0) }
-                    // Keep calls and Siri on the iPhone; only intended playback goes to LAN viewers.
-                    if let onBrowserAudio, !requestsMicrophone, !["telephony", "speechrecognition"].contains(audioType) {
-                        let streamType = type.intValue
+                    output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
+                    let streamType = type.intValue
+                    output.onPCM = { [weak self] buffer in self?.onAudioPCM?(streamType, buffer) }
+                    // 修复：微信/电话的通话音频（stream 100 / telephony）原来被这里排除，
+                    // 导致网页版和车机浏览器永远收不到通话声音（"双方听不到"）。
+                    // 现在所有音频流——包括音乐、通话、Siri——解码后一律转发给网页/车机浏览器，
+                    // 由 shouldForwardAudio（页面是否要点声音）决定本机是否让位，不再按 audioType 一刀切。
+                    if let onBrowserAudio {
                         output.onBrowserAudio = { buffer, stamp in onBrowserAudio(streamType, buffer, stamp) }
                     }
                     audio[type.intValue] = output

@@ -38,9 +38,17 @@ final class NativeReceiver {
     // forceKeyFrame state: throttled sends, resent every second until a keyframe arrives.
     private var keyframeWantedSince: DispatchTime?
     private var keyframeLastSent: DispatchTime?
+    /// 只报一次“伴音开关没开”，免得每个音频包都刷日志。
+    private var loggedCarLifeAudioBlocked = false
     private var keyframeAttempts = 0
     private var keyframeReason = ""
     private var touchSlots = TouchSlots(count: CarPlayInfo.touchContacts)
+    /// 抬起报告是否被压后（见 sendTouch），以及按下时刻/上次日志时刻。
+    private var pendingRelease: [CarPlayInfo.TouchContact]?
+    private var touchDownAt = 0.0
+    private var lastTouchLog = 0.0
+    /// 上一次发出的音乐状态，用来决定"播放/暂停"该明确发哪一个键。
+    private var assumedPlaying = true
     private var displaySize: (width: Int, height: Int)?
     private var nightMode: Bool?
     /// 主线程：最近一次车机网页上报的真实视口（工具栏收起后的全屏尺寸）。
@@ -52,6 +60,13 @@ final class NativeReceiver {
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
     private let carLife = CarLifeOutput()
+    /// 从最近一个 IDR 到当前的全部帧。iPhone 只在会话开始送一个关键帧，之后 forceKeyFrame
+    /// 会被 iOS 16 回 408；车机连进来时把这段缓存按顺序回放，就能从第一帧起连续解码。
+    private var carLifeGOP: [Data] = []
+    private var carLifeGOPBytes = 0
+    private var carLifeGOPCodec: VideoCodec = .h264
+    private var carLifeParamSets: [Data] = []
+    private let carLifeGOPLimit = 12 * 1024 * 1024
     private let zeeho = ZeehoOutput()
     var onZeehoState: ((String) -> Void)?
     private let ninebot = NinebotOutput()
@@ -65,6 +80,8 @@ final class NativeReceiver {
     var onBrowserDisplay: ((BrowserDisplay?, UUID?) -> Void)?
     /// Main thread: the car page tapped "开始投屏"; the peer is the browser address.
     var onBrowserStart: ((String) -> Void)?
+    /// Main thread: the car page asked to reconnect CarPlay at the current window size.
+    var onBrowserRefit: ((String) -> Void)?
     /// Main thread: a browser keeps hitching.
     var onBrowserStruggling: ((String, String) -> Void)?
     /// Main thread: the CarPlay car button was tapped (requestUI).
@@ -118,13 +135,21 @@ final class NativeReceiver {
         videoOutput.onDisplay = { [weak self] display, viewerID in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let display, display.height >= 500 { self.headUnitScreen = display }
+                if let display, display.height >= 500,
+                   display.width * display.height > (self.headUnitScreen.map { $0.width * $0.height } ?? 0) {
+                    // 桌面上也打开接收页时，先接上的小窗口（比如 Edge 1358×610）不能抢走主屏；
+                    // 车机 1922×858 面积更大，等它上报后按它建立会话。
+                    self.headUnitScreen = display
+                }
                 self.onBrowserDisplay?(display, viewerID)
             }
         }
         videoOutput.onStruggling = { [weak self] peer, reason in DispatchQueue.main.async { self?.onBrowserStruggling?(peer, reason) } }
         videoOutput.onStartRequest = { [weak self] peer in
             DispatchQueue.main.async { self?.onBrowserStart?(peer) }
+        }
+        videoOutput.onRefitRequest = { [weak self] peer in
+            DispatchQueue.main.async { self?.onBrowserRefit?(peer) }
         }
     }
     func start(configuration: ReceiverConfiguration, identity: AccessoryIdentity, advertise: Bool = true,
@@ -164,11 +189,13 @@ final class NativeReceiver {
                 self.tailing.start(localAddress: configuration.address, targetAddress: target, phone: phone)
             }
             if configuration.carLifeEnabled {
+                self.carLifeGOP = []; self.carLifeGOPBytes = 0; self.carLifeParamSets = []
                 self.carLife.onLog = { [weak self] in self?.log($0) }
                 self.carLife.onState = { [weak self] in self?.onCarLifeState?($0) }
                 self.carLife.onTouches = { [weak self] in self?.touches(source: "carlife", $0) }
                 self.carLife.onControl = { [weak self] in self?.press($0) }
                 self.carLife.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
+                self.carLife.onStartFrameNeeded = { [weak self] in self?.sendCachedCarLifeKeyFrame() }
                 self.carLife.start(targetAddress: configuration.carLifeAddress, width: configuration.width,
                                    height: configuration.height, fps: configuration.maxFPS)
             }
@@ -217,11 +244,15 @@ final class NativeReceiver {
         }
         let generation = self.generation
         let deadline = Date().addingTimeInterval(25)
+        // 桌上电脑也开着接收页时，它往往先连上（Edge 1358×610）。给它几秒宽限，等车机
+        // 那种大屏（≥1600 宽、≥700 高）上报后再建会话，免得按小窗口的画面尺寸开局。
+        let grace = Date().addingTimeInterval(4)
         self.log("等待车机网页上报全屏尺寸后再建立 CarPlay 会话（最多 25 秒；车机先打开接收页会更快）")
         func attempt() {
             guard self.generation == generation else { return }
             let reported = self.headUnitScreen
-            if let reported, reported.height >= 500 {
+            if let reported, reported.height >= 500,
+               reported.width >= 1600 || Date() > grace {
                 var updated = configuration
                 updated.width = reported.width; updated.height = reported.height
                 self.queue.async { [weak self] in
@@ -339,8 +370,44 @@ final class NativeReceiver {
                     y: UInt16(clamping: Int((min(max(entry.y, 0), 1) * Double(max(size.height - 1, 0))).rounded())),
                     down: entry.down)
             }
-            self.activeMedia?.touch(contacts)
+            if contacts.contains(where: { $0.down }),
+               let first = contacts.first(where: { $0.down }),
+               ProcessInfo.processInfo.systemUptime - self.lastTouchLog > 0.5 {
+                self.lastTouchLog = ProcessInfo.processInfo.systemUptime
+                self.log("触控按下 (\(first.x),\(first.y)) / \(size.width)×\(size.height)")
+            }
+            self.sendTouch(contacts)
         }
+    }
+    /// 按下和抬起之间至少隔 80 ms 再上报。太快的一对报告会被 iOS 当成双击/手势，
+    /// 在 CarPlay 的音乐界面上的表现就是"点播放跳到下一曲"。
+    private func sendTouch(_ contacts: [CarPlayInfo.TouchContact]) {
+        flushPendingRelease()
+        guard let media = activeMedia else { return }
+        let pressed = contacts.contains { $0.down }
+        let now = ProcessInfo.processInfo.systemUptime
+        if pressed {
+            touchDownAt = now
+            media.touch(contacts)
+            return
+        }
+        // 还有手指没抬起来时不做延时，避免把别人的手指一起放掉。
+        guard !contacts.isEmpty else { return }
+        let elapsed = now - touchDownAt
+        let hold = 0.08
+        if elapsed < hold {
+            pendingRelease = contacts
+            queue.asyncAfter(deadline: .now() + (hold - elapsed)) { [weak self] in
+                self?.flushPendingRelease()
+            }
+            return
+        }
+        media.touch(contacts)
+    }
+    private func flushPendingRelease() {
+        guard let pending = pendingRelease else { return }
+        pendingRelease = nil
+        activeMedia?.touch(pending)
     }
     func press(_ control: CarPlayControl) {
         queue.async { [weak self] in
@@ -353,7 +420,12 @@ final class NativeReceiver {
             case .knobPrevious: media.pressHID(CarPlayInfo.HID.knob, CarPlayInfo.knobReport(wheel: -1), release: knobUp)
             case .knobNext: media.pressHID(CarPlayInfo.HID.knob, CarPlayInfo.knobReport(wheel: 1), release: knobUp)
             case .previous: media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.previous.rawValue]), release: Data([0]))
-            case .playPause: media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.playPause.rawValue]), release: Data([0]))
+            case .playPause:
+                // 先发标准的"播放/暂停"切换键（usage 0xCD）。描述符已改成"值即 usage"，0xCD 就是播放/暂停，
+                // 不再是旧描述符下被解析成下一曲的那个含糊序号。
+                media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.playPause.rawValue]), release: Data([0]))
+                self.assumedPlaying.toggle()
+                self.log("音乐键：播放/暂停")
             case .next: media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.next.rawValue]), release: Data([0]))
             case .siri: media.requestSiri()
             case .hookSwitch: media.pressHID(CarPlayInfo.HID.telephony, Data([CarPlayInfo.TelephonyKey.hookSwitch.rawValue]), release: Data([0]))
@@ -372,6 +444,16 @@ final class NativeReceiver {
     func requestKeyFrame(reason: String) {
         queue.async { [weak self] in self?.requestKeyFrameOnQueue(reason: reason) }
     }
+    /// 车机（CarLife）刚请求画面时调用：把缓存的那段（关键帧开头，一直到当前）按顺序回放，
+    /// 车机解码器就能从第一帧起连续解码；不用等 iPhone 再造新关键帧（iOS 16 那条会被 408 拒绝）。
+    private func sendCachedCarLifeKeyFrame() {
+        queue.async { [weak self] in
+            guard let self, !self.carLifeGOP.isEmpty else { return }
+            self.log("CarLife：回放缓存的 \(self.carLifeGOP.count) 帧给车机开画")
+            self.carLife.replay(self.carLifeGOP, codec: self.carLifeGOPCodec, parameterSets: self.carLifeParamSets)
+        }
+    }
+
     private func requestKeyFrameOnQueue(reason: String) {
         let now = DispatchTime.now()
         if keyframeWantedSince == nil { keyframeWantedSince = now; keyframeAttempts = 0; keyframeReason = reason }
@@ -490,11 +572,27 @@ final class NativeReceiver {
                 let media = CarPlayMediaSession(queue: queue, secret: secret, peerAddress: state.peerAddress,
                                                 audioEnabled: configuration.audioEnabled, hevc: configuration.videoCodec == .h265)
                 media.onLog = { [weak self] in self?.log($0) }
-                if configuration.browserAudio {
-                    media.onBrowserAudio = { [weak self] stream, buffer, stamp in
-                        self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
-                    }
+                // 原来这里用 configuration.browserAudio 才挂音频回调：JPEG 兼容模式下这个标志
+                // 一旦是 false，iPhone 的音频连送都进不来。音频要不要给页面由页面自己点，
+                // 这里无条件接住，最多是没客户端要时白白丢掉。
+                media.onBrowserAudio = { [weak self] stream, buffer, stamp in
+                    self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
                 }
+                // CarLife 车机端的伴音：把每一路解码后的 PCM 直接喂给车机的音频模块。
+                let carLifeOn = configuration.carLifeEnabled
+                let carLifeAudioOn = configuration.carLifeAudio
+                media.onAudioPCM = { [weak self] _, buffer in
+                    guard let self else { return }
+                    guard carLifeOn, carLifeAudioOn else {
+                        if !self.loggedCarLifeAudioBlocked {
+                            self.loggedCarLifeAudioBlocked = true
+                            self.log("CarLife 伴音：音频没送去车机（CarLife 模式=\(carLifeOn ? "开" : "关")，「随画面传输」=\(carLifeAudioOn ? "开" : "关")）")
+                        }
+                        return
+                    }
+                    self.carLife.appendAudio(buffer)
+                }
+                media.browserAudioWanted = { [weak self] in self?.videoOutput.hasAudioViewers ?? false }
                 if let nightMode { media.setNightMode(nightMode) }
                 media.onVideo = { [weak self] data, codec in
                     guard let self else { return }
@@ -509,7 +607,21 @@ final class NativeReceiver {
                     if configuration.zeehoAddress != nil { self.zeeho.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.ninebotAddress != nil { self.ninebot.append(data, codec: codec, keyframe: keyframe) }
                     if configuration.tailingAddress != nil { self.tailing.append(data, codec: codec) }
-                    if configuration.carLifeEnabled { self.carLife.append(data, codec: codec) }
+                    if configuration.carLifeEnabled {
+                        // 只留最近一个 GOP：车机后连时靠它从关键帧起连续解码。
+                        if keyframe {
+                            self.carLifeGOP = [data]; self.carLifeGOPBytes = data.count
+                            self.carLifeGOPCodec = codec
+                        } else if self.carLifeGOPBytes + data.count <= self.carLifeGOPLimit, !self.carLifeGOP.isEmpty {
+                            self.carLifeGOP.append(data); self.carLifeGOPBytes += data.count
+                        }
+                        if self.carLifeParamSets.count < 2, let units = try? AnnexB.units(in: data) {
+                            // 缓存原始 NAL 单元（SPS/PPS），会话重建后参数集丢失时用它补回来。
+                            let sets = units.filter { codec.parameterSet($0) != nil }
+                            if sets.count >= 2 { self.carLifeParamSets = sets }
+                        }
+                        self.carLife.append(data, codec: codec)
+                    }
                     if configuration.carLinkRelayAddress != nil { self.carLink.append(data, codec: codec) }
                     if self.localSkipping {
                         guard keyframe, self.localInFlight < self.maximumLocalInFlight / 2 else { return }

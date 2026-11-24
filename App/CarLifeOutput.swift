@@ -8,6 +8,7 @@ import CryptoKit
 import CommonCrypto
 import Security
 import Darwin
+import AVFoundation
 
 /// Sends the CarPlay picture to a head unit's CarLife app and takes its touches and keys back.
 ///
@@ -30,6 +31,7 @@ final class CarLifeOutput {
     private var warnedCodec = false
     private var discoverySocket: Int32 = -1
     private var discoveryErrorLogged = false
+    private var audioReceived = 0
     private var timer: DispatchSourceTimer?
 
     var onLog: ((String) -> Void)?
@@ -38,6 +40,9 @@ final class CarLifeOutput {
     var onTouches: (([TouchPoint]) -> Void)?
     var onControl: ((CarPlayControl) -> Void)?
     var onKeyframeRequest: ((String) -> Void)?
+    /// The head unit just asked for a picture. The owner may hand over a cached IDR so the
+    /// receiver does not have to wait for a brand-new keyframe (iOS 16 rejects forceKeyFrame).
+    var onStartFrameNeeded: (() -> Void)?
 
     func start(targetAddress: String?, width: Int, height: Int, fps: Int) {
         queue.async { [weak self] in
@@ -66,6 +71,19 @@ final class CarLifeOutput {
 
     func append(_ accessUnit: Data, codec: VideoCodec) {
         queue.async { [weak self] in self?.appendOnQueue(accessUnit, codec: codec) }
+    }
+
+    /// 把 CarPlay 解码出来的 PCM 交给车机端的伴音通道（CarLife 音乐模块，通道 3）。
+    /// 第一包一定打一条日志，用来区分“音频根本没进来”和“进来了但通道没建”。
+    func appendAudio(_ buffer: AVAudioPCMBuffer) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.audioReceived += 1
+            if self.audioReceived == 1 {
+                self.log("CarLife 伴音：收到第一路音频 \(Int(buffer.format.sampleRate.rounded())) Hz / \(buffer.format.channelCount) 声道")
+            }
+            self.session?.audio(buffer)
+        }
     }
 
     func stop() { queue.async { [weak self] in self?.stopOnQueue() } }
@@ -127,6 +145,7 @@ final class CarLifeOutput {
         session.onTouches = { [weak self] in self?.onTouches?($0) }
         session.onControl = { [weak self] in self?.onControl?($0) }
         session.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?("CarLife：\($0)") }
+        session.onStartFrameNeeded = { [weak self] in self?.onStartFrameNeeded?() }
         return session
     }
 
@@ -165,6 +184,18 @@ final class CarLifeOutput {
     }
 
     // MARK: Video
+
+    /// 把“关键帧开头、一直到当前”的缓存段整段补给车机，让它的解码器有完整依赖链。
+    /// 回放期间不按积压跳过帧，否则序列会断在中途。
+    func replay(_ accessUnits: [Data], codec: VideoCodec, parameterSets: [Data]) {
+        queue.async { [weak self] in
+            guard let self, let session = self.session else { return }
+            for set in parameterSets { _ = self.parameters.absorb(set) }
+            session.replaying = true
+            for unit in accessUnits { self.appendOnQueue(unit, codec: codec) }
+            session.replaying = false
+        }
+    }
 
     private func appendOnQueue(_ accessUnit: Data, codec: VideoCodec) {
         guard running else { return }
@@ -534,6 +565,9 @@ private final class Session {
     private var waitingForKeyframe = true
     private var parameterSetsSent = false
     private var skips = 0
+    private var loggedNoVideoLink = false
+    /// 正在回放缓存段，这期间不按积压跳帧。
+    var replaying = false
     /// Held fingers in the order they went down; pointer-up indexes refer to this order.
     private var touches: [TouchPoint] = []
     /// Above this backlog on the video socket, frames are skipped to the next keyframe.
@@ -544,20 +578,36 @@ private final class Session {
     var onTouches: (([TouchPoint]) -> Void)?
     var onControl: ((CarPlayControl) -> Void)?
     var onKeyframeRequest: ((String) -> Void)?
+    /// The head unit just asked for a picture. The owner may hand over a cached IDR so the
+    /// receiver does not have to wait for a brand-new keyframe (iOS 16 rejects forceKeyFrame).
+    var onStartFrameNeeded: (() -> Void)?
 
     init(peer: String, width: Int, height: Int, maxFPS: Int) {
         self.peer = peer; self.width = width; self.height = height; self.maxFPS = maxFPS; fps = maxFPS
     }
 
+    private static func port(for channel: Int) -> String {
+        CarLifeOutput.ports.indices.contains(channel - 1) ? String(CarLifeOutput.ports[channel - 1]) : "?"
+    }
+
     func attach(_ link: Link) {
         channels.updateValue(link, forKey: link.channel)?.connection.cancel()
-        if link.channel == 1 { log?("车机 \(peer) 已连接") }
+        if link.channel == 1 {
+            log?("车机 \(peer) 已连接")
+        } else {
+            log?("CarLife 通道 \(link.channel) 已连接（端口 \(Self.port(for: link.channel))）")
+        }
     }
     func owns(_ link: Link) -> Bool { channels[link.channel] === link }
     func ownsChannel(_ channel: Int) -> Bool { channels[channel] != nil }
 
     func receive(_ wire: CarLifeMessage) throws {
         guard active else { return }
+        // 车机如果对音乐模块有回应（准备/错误码），这里就能看到；一直没有输出说明它压根没派发。
+        if wire.channel == 3, channelThreeInbound < 8 {
+            channelThreeInbound += 1
+            log?("CarLife 通道 3 收到车机消息 id=\(wire.id)，长度 \(wire.payload.count)")
+        }
         let message = try crypto.transform(wire, encrypt: false)
         guard profile != nil || message.id == 98305 else { return }
         func proto() throws -> CarLifeProto { try CarLifeProto(parsing: message.payload) }
@@ -627,7 +677,12 @@ private final class Session {
         case 98313:
             try require(authenticated, "unexpected_phase")
             streaming = true; waitingForKeyframe = true
+            loggedNoVideoLink = false
             onState?("CarLife：车机已请求画面，正在等待关键帧")
+            log?("CarLife：车机请求画面（视频通道 \(channels[2] == nil ? "未建立" : "已建立")）")
+            // 现有代码只会向 iPhone 要一个新 IDR。iOS 16.x 会把这个事件命令回 408，
+            // 于是车机永远等不到关键帧。这里同时让上层把缓存中的 IDR 直接回放给车机。
+            onStartFrameNeeded?()
             requestKeyframe("车机请求画面")
         case 98314:
             streaming = false
@@ -663,11 +718,19 @@ private final class Session {
     // MARK: Video
 
     func video(picture: [Data], keyframe: Bool, parameterSets: [Data]) {
-        guard active, authenticated, streaming, let videoLink = channels[2], let profile else { return }
+        guard active, authenticated, streaming else { return }
+        guard let videoLink = channels[2], let profile else {
+            // 只报一次，免得刷屏；这行能区分“通道没建”和“参数集没拿到”。
+            if !loggedNoVideoLink {
+                loggedNoVideoLink = true
+                log?("CarLife：画面暂不可发（视频通道\(channels[2] == nil ? "未建立" : "已建立")，编码参数\(profile == nil ? "缺失" : "就绪")）")
+            }
+            return
+        }
         if waitingForKeyframe {
             guard keyframe else { return }
             waitingForKeyframe = false
-        } else if !keyframe, videoLink.pendingBytes > skipPendingBytes {
+        } else if !keyframe, !replaying, videoLink.pendingBytes > skipPendingBytes {
             // Never drop a single dependent frame: skip the rest of this GOP and ask for an IDR.
             waitingForKeyframe = true; skips += 1
             if skips == 1 || skips % 10 == 0 { log?("车机网络跟不上，跳到下一个关键帧（第 \(skips) 次）") }
@@ -697,12 +760,121 @@ private final class Session {
         if framesSent == 1 { onState?("CarLife：正在向车机 \(peer) 发送 CarPlay 画面") }
     }
 
+    // MARK: Audio (CarLife 音乐模块，通道 3)
+
+    /// 车机端 CarLife 的音乐模块（`La/a/b/p/a;`）只在通道 3 上收音频：
+    /// · 0x30001 带 CarlifeMusicInit{sampleRate, channelConfig, sampleFormat}，收到就建 AudioTrack；
+    /// · 0x30003 / 0x30004 = 播放 / 暂停，0x30002 = 结束；
+    /// · 0x30006 携带裸 PCM（PCM16 小端），车机把它塞进自己的播放队列。
+    /// 采样率/声道按 CarPlay 实际送来的格式走，channelConfig 用 Android AudioFormat 的常量。
+    private enum MusicCommand {
+        static let initialize = 196_609   // 0x30001
+        static let stop = 196_610         // 0x30002
+        static let play = 196_611         // 0x30003
+        static let pause = 196_612        // 0x30004
+        static let data = 196_614         // 0x30006
+    }
+    private var audioRate = 0, audioChannels = 0
+    private var audioInitAt = DispatchTime(uptimeNanoseconds: 0)
+    private var audioInitLink: ObjectIdentifier?
+    private var lastAudioReport = DispatchTime(uptimeNanoseconds: 0)
+    private var audioFramesSent = 0
+    private var audioPlayed = false
+    private var loggedNoAudioChannel = false
+    /// 车机在通道 3 上回过来的消息计数，只记前几条用于诊断。
+    private var channelThreeInbound = 0
+    private var lastPlayAt = DispatchTime(uptimeNanoseconds: 0)
+    private var lastAudioAt = DispatchTime(uptimeNanoseconds: 0)
+
+    private var audioLink: Link? {
+        // 车机只在通道 3 上认音乐消息；通道没建时不要往别的通道乱发。
+        channels[3]
+    }
+
+    func audio(_ buffer: AVAudioPCMBuffer) {
+        guard active, authenticated else { return }
+        let frames = Int(buffer.frameLength)
+        let channelsInBuffer = Int(buffer.format.channelCount)
+        let rate = Int(buffer.format.sampleRate.rounded())
+        guard frames > 0, channelsInBuffer > 0, rate >= 8000 else { return }
+        guard let link = audioLink else {
+            if !loggedNoAudioChannel {
+                loggedNoAudioChannel = true
+                log?("CarLife：音频通道（通道 3 / 端口 9240）没建立，声音暂时送不上车机")
+            }
+            return
+        }
+        let linkID = ObjectIdentifier(link)
+        // 通道 3 可能比音频晚到（车机自己决定什么时候连），换了 socket 就得重发一次初始化，
+        // 否则车机那边根本没建 AudioTrack，数据进来也只能丢。
+        if audioRate != rate || audioChannels != channelsInBuffer || audioInitLink != linkID {
+            audioRate = rate; audioChannels = channelsInBuffer; audioFramesSent = 0
+            // 车机的 `La/a/b/l/c/d/b;`（AudioParams）把这三个数当成 (sampleRate, channelCount, bitDepth)：
+            //   c() 用 channelCount==1 → CHANNEL_OUT_MONO(4)，否则 STEREO(12)；
+            //   b() 用 bitDepth==16 → ENCODING_PCM_16BIT(2)，否则 FLOAT(3)。
+            // 所以这里必须送"声道数 1/2"和"位深 16"，送 Android 枚举(4/12、2)会被当成 4 声道 + float。
+            let initData = CarLifeProtoWriter().number(1, Int64(rate)).number(2, Int64(channelsInBuffer)).number(3, 16).data
+            send(3, MusicCommand.initialize, initData)
+            audioInitAt = .now()
+            send(3, MusicCommand.play)
+            audioPlayed = true
+            lastPlayAt = .now()
+            audioInitLink = linkID
+            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 / 16 位 PCM16（通道 3 已就绪）")
+        }
+        // 太久没声（切歌/暂停后恢复）时补一次播放命令，免得车机还停在暂停态。
+        let now = DispatchTime.now().uptimeNanoseconds
+        if !audioPlayed || now - lastAudioAt.uptimeNanoseconds > 1_000_000_000 {
+            send(3, MusicCommand.play); audioPlayed = true; lastPlayAt = .now()
+        }
+        lastAudioAt = .now()
+        guard let pcm = Self.pcm16(buffer) else { return }
+        // 车机端写入跟不上就丢这一小段，别把整条连接堵死。
+        guard link.pendingBytes < 512 * 1024 else { return }
+        guard send(3, MusicCommand.data, pcm) else { return }
+        if audioFramesSent == 0 { log?("CarLife 伴音：已开始向车机送音频（\(pcm.count) 字节/包）") }
+        audioFramesSent += frames
+    }
+
+    /// Float32（AVAudioEngine 的标准格式）→ 交错 PCM16 小端。
+    static func pcm16(_ buffer: AVAudioPCMBuffer) -> Data? {
+        guard let planes = buffer.floatChannelData else { return nil }
+        let frames = Int(buffer.frameLength), channels = Int(buffer.format.channelCount)
+        guard frames > 0, channels > 0 else { return nil }
+        var data = Data(count: frames * channels * 2)
+        data.withUnsafeMutableBytes { raw in
+            guard let out = raw.bindMemory(to: Int16.self).baseAddress else { return }
+            for frame in 0..<frames {
+                for channel in 0..<channels {
+                    let value = max(-1, min(1, Double(planes[channel][frame])))
+                    out[frame * channels + channel] = Int16(value * 32_767)
+                }
+            }
+        }
+        return data
+    }
+
     func tick() {
         guard active, profile != nil else { return }
         let now = DispatchTime.now().uptimeNanoseconds
-        if now - lastSent.uptimeNanoseconds > 1_000_000_000 { send(channels[2] != nil ? 2 : 1, 131074) }
-        // Some head units only recover from decoder resets at a keyframe; keep them regular.
-        if streaming, now - lastKeyframeRequest.uptimeNanoseconds >= 1_500_000_000 { requestKeyframe(nil) }
+        if now - lastSent.uptimeNanoseconds > 1_000_000_000 { send(channels[2] != nil ? 2 : 1, 131074) }        // Some head units only recover from decoder resets at a keyframe; keep them regular.
+        if streaming, now - lastKeyframeRequest.uptimeNanoseconds >= 1_500_000_000 {
+            // 一帧都还没发出去时，同时让上层把缓存 IDR 再回放一次：
+            // 车机常常是“先请求画面、后开视频通道”，第一次回放会落在通道还没建的空档上。
+            if framesSent == 0, waitingForKeyframe { onStartFrameNeeded?() }
+            requestKeyframe(nil)
+        }
+        // 每 5 秒报一次伴音实况：这行能一眼看出是“没送出去”还是“送了车机不播”。
+        if audioRate > 0, now - lastAudioReport.uptimeNanoseconds >= 5_000_000_000 {
+            lastAudioReport = .now()
+            let seconds = audioRate > 0 ? audioFramesSent / audioRate : 0
+            log?("CarLife 伴音：已送 \(seconds) 秒音频，通道3\(audioLink == nil ? "未建立" : "已建立")，待写 \(audioLink?.pendingBytes ?? 0) 字节")
+        }
+        // 有些车机把最早的 play 吞掉后一直停在“已初始化未播放”，定期补一次（不会打断正在播的）。
+        if audioRate > 0, audioLink != nil, now - lastPlayAt.uptimeNanoseconds >= 5_000_000_000 {
+            lastPlayAt = .now()
+            send(3, MusicCommand.play)
+        }
     }
 
     private func requestKeyframe(_ reason: String?) {

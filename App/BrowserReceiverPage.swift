@@ -21,44 +21,91 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.4.0-startbutton"
+    static let version = "1.9.0-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <link rel="icon" href="data:,">
-<title>CarWithin</title>
+<title>YCarWith</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#05070b;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
-main{position:relative;width:100%;height:100%}video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
-#touch{position:absolute;inset:0;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+main{position:relative;width:100%;height:100%}video,canvas{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
+/* 车机是 Chromium 53：inset:0 要 Chrome 87 才支持，写了等于没写 → #touch 没有宽高、变成 0×0，
+   手指全落在它外面，页面一辈子收不到 touchstart，这就是"车机上完全点不动"的真因。
+   一律改成 left/top/right/bottom + width/height。 */
+#touch{position:fixed;left:0;top:0;right:0;bottom:0;width:100%;height:100%;z-index:2;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 #startPlayback{position:fixed;z-index:5;top:50%;left:50%;transform:translate(-50%,-50%);background:#0a84ff;font-size:17px;padding:12px 20px}
 /* CarMode 那种入口：页面先接入，屏幕上给一个"开始投屏"按钮，点了才发起 CarPlay 会话。 */
-#startCard{position:fixed;z-index:6;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0d1626;color:#fff;text-align:center;padding:24px}
+#startCard{position:fixed;z-index:6;left:0;top:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0d1626;color:#fff;text-align:center;padding:24px}
 #startCard h1{margin:0;font-size:34px;font-weight:600}
 #startCard p{margin:0;font-size:16px;color:#8b9bb4}
 #startCard button{border:0;border-radius:14px;padding:16px 40px;background:#0a84ff;color:#fff;font-size:20px;cursor:pointer}
-#top{position:fixed;z-index:3;left:16px;right:16px;top:14px;left:max(16px,env(safe-area-inset-left));right:max(16px,env(safe-area-inset-right));top:max(14px,env(safe-area-inset-top));display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
+/* 出画后如果网页拿不到播放权限，就给一条"开启声音"提示；不做全屏遮罩，免得挡住车机上的操作。 */
+#soundCard{position:fixed;z-index:7;left:50%;bottom:28px;transform:translateX(-50%);display:flex;flex-direction:row;align-items:center;gap:12px;padding:12px 16px;border-radius:16px;background:rgba(12,18,28,.94);color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.5);max-width:calc(100vw - 40px)}
+#soundCard h1{display:none}
+#soundCard p{margin:0;font-size:15px;line-height:1.4;color:#c7d2e0}
+#soundCard button{border:0;border-radius:12px;padding:10px 18px;background:#0a84ff;color:#fff;font-size:16px;cursor:pointer;white-space:nowrap}
+#soundCard .sClose{padding:9px 14px;background:rgba(255,255,255,.14);font-size:14px}
+/* 返回键/后退按钮走到最后一步时弹的确认框：取消留着，确认才真的退出投屏界面。 */
+#exitCard{position:fixed;z-index:9;left:50%;top:50%;transform:translate(-50%,-50%);min-width:300px;max-width:calc(100vw - 40px);padding:22px 24px;border-radius:18px;background:rgba(16,22,32,.96);color:#fff;text-align:center;box-shadow:0 18px 50px rgba(0,0,0,.65)}
+#exitCard p{margin:0 0 6px;font-size:18px;font-weight:600}
+#exitCard .exNote{margin:0 0 18px;font-size:14px;font-weight:400;color:#9aa7b8}
+#exitCard .exRow{display:flex;gap:12px;justify-content:center}
+#exitCancel{border:0;border-radius:12px;padding:11px 26px;font-size:16px;cursor:pointer;background:rgba(255,255,255,.16);color:#fff}
+#exitConfirm{border:0;border-radius:12px;padding:11px 26px;font-size:16px;cursor:pointer;background:#0a84ff;color:#fff}
+.exited main,.exited #top,.exited #stats,.exited #touch,.exited #soundCard{display:none}
+#exitedNote{position:fixed;z-index:10;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;color:#8b9bb4;font-size:16px;display:none}
+#exitedRefresh{display:block;margin:18px auto 0;border:0;border-radius:12px;padding:12px 34px;font-size:17px;cursor:pointer;background:#0a84ff;color:#fff}
+.exited #exitedNote{display:block}
+/* CarMode 的右上角"菜单"：点开是一个白色二级面板（进入全屏 / 在车机播放声音 / 画面适应 / 断开本浏览器）。 */
+/* 起始页的"菜单"：文字蓝色、按钮和边框全透明，位置比原来下移 2cm（CSS 1cm = 37.8px，共约 76px）。 */
+#menuBtn{position:fixed;z-index:8;right:16px;top:90px;padding:10px 18px;border:0;border-radius:12px;background:none;background-color:transparent;box-shadow:none;color:#0a84ff;font-size:16px;cursor:pointer;backdrop-filter:none;-webkit-backdrop-filter:none}
+#menuBtn:active{background:none}
+/* max()/env() 在 Chromium 53 也是无效值，会整条声明被丢掉，所以这里只用普通像素值。 */
+#menuPanel{position:fixed;z-index:8;right:16px;top:66px;width:320px;max-width:calc(100vw - 32px);padding:18px 22px;border-radius:18px;background:#fff;color:#111;text-align:left;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+#menuPanel .miTitle{font-size:14px;color:#8a8a90;margin:0 0 6px}
+#menuPanel .mi{display:block;width:100%;text-align:left;border:0;background:none;padding:12px 0;font:inherit;font-size:17px;font-weight:600;color:#111;cursor:pointer}
+#menuPanel .miNote{margin:12px 0 0;font-size:13px;line-height:1.55;color:#6b6b70}
+/* 起始页（还没投屏时的"浏览器已接入"页）上的"菜单"：只改这颗按钮——
+   文字蓝色、底色和边框全透明、整体往下挪 2cm。二级面板完全不动。 */
+.onStart #menuBtn{top:calc(14px + 2cm);background:transparent;border:0;color:#0a84ff;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none}
+#top{position:fixed;z-index:3;left:16px;right:16px;top:14px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;pointer-events:none}
 .badge{padding:9px 13px;border-radius:14px;background:rgba(18,24,36,.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);font-size:14px}.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9f0a;margin-right:8px}.ok .dot{background:#30d158}.bad .dot{background:#ff453a}
 .toolbar{display:flex;flex-direction:column;align-items:flex-end;gap:8px}.actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}.actions>*{white-space:nowrap}button,a.chip{pointer-events:auto;border:0;border-radius:13px;padding:9px 13px;background:rgba(18,24,36,.82);color:#fff;font:inherit;font-size:14px;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer;text-decoration:none}
-#stats{position:fixed;z-index:3;left:max(16px,env(safe-area-inset-left));top:calc(max(14px,env(safe-area-inset-top)) + 46px);font:12px/1.5 ui-monospace,Menlo,monospace;color:#d1d1d6;white-space:pre}
+#stats{position:fixed;z-index:3;left:16px;top:60px;font:12px/1.5 ui-monospace,Menlo,monospace;color:#d1d1d6;white-space:pre}
 .tp{position:fixed;z-index:4;width:44px;height:44px;margin:-22px 0 0 -22px;border-radius:50%;border:3px solid rgba(255,255,255,.9);background:rgba(10,132,255,.35);pointer-events:none}
 #status,#fast,#statsButton,#full{transition:opacity .3s,visibility .3s}
 .idle #top:not(:focus-within) :is(#status,#fast,#statsButton,#full){opacity:0;visibility:hidden}
+/* 车机是 Chromium 53，没有 :focus-within，上面那条规则整条失效 → "CarPlay 1436×640…"一直挂着。
+   补一条只依赖 .idle 的规则，动画结束状态由 wake() 控制。 */
+.idle #status{opacity:0;visibility:hidden}
 .fullscreen :is(#status,.actions,#stats,#startPlayback){display:none}
 .fullscreen #top{justify-content:flex-end}
 [hidden]{display:none!important}
 </style>
 </head>
 <body><main><video id="video" muted autoplay playsinline disablepictureinpicture disableremoteplayback></video><canvas id="view" hidden></canvas><canvas id="hold" hidden></canvas><div id="touch"></div></main>
-<div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 CarWithin…</span></div><div class="toolbar">
-  <div class="actions"><a id="fast" class="chip" hidden>配置 HTTPS</a><button id="statsButton">统计</button><button id="full">全屏</button></div>
-  <button id="enableAudio" hidden>开启声音</button>
+<div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 YCarWith…</span></div><div class="toolbar">
+  <button id="menuBtn" hidden>菜单</button>
+  <div id="menuPanel" hidden>
+    <p class="miTitle">浏览器已接入</p>
+    <button class="mi" id="miFull">进入全屏</button>
+    <button class="mi" id="miRefit">按新尺寸重新适配</button>
+    <p class="miNote">将按当前窗口比例重新连接 CarPlay。</p>
+    <button class="mi" id="miAudio">在车机播放声音</button>
+    <button class="mi" id="miFit">画面适应 · 保持比例</button>
+    <button class="mi" id="miDisconnect">断开本浏览器</button>
+    <p class="miNote">点击开启网页声音。要改用手机扬声器，请在 iPhone 控制中心选择 iPhone。</p>
+  </div>
 </div></div>
 <div id="stats" class="badge" hidden></div>
 <div id="startCard" hidden><h1>浏览器已接入</h1><p>可在手机或浏览器开始连接。</p><button id="startBtn">开始投屏</button></div>
+<div id="soundCard" hidden><h1>声音还没开</h1><p>点“开启声音”，CarPlay 的声音就从车机喇叭播放。</p><button id="soundBtn">开启声音</button><button id="soundClose" class="sClose">暂不</button></div>
 <button id="startPlayback" hidden>开始播放</button>
+<div id="exitCard" hidden><p>退出投屏？</p><p class="exNote">确认后断开画面和声音，退出投屏界面。</p><div class="exRow"><button id="exitCancel">取消</button><button id="exitConfirm">确认</button></div></div>
+<div id="exitedNote"><span>已退出投屏，刷新页面可重新连接</span><button id="exitedRefresh">刷新页面</button></div>
 <script>
 /* This early check uses ES5 so even a restricted WebView can explain why playback cannot start. */
 (function () {
@@ -79,17 +126,69 @@ const $=s=>document.querySelector(s);
 const video=$('#video'),view=$('#view'),hold=$('#hold'),touchLayer=$('#touch'),statusEl=$('#status'),label=statusEl.querySelector('span:last-child'),statsEl=$('#stats'),fastLink=$('#fast');
 const MS=(/iPhone|iPad|iPod/.test(navigator.userAgent)&&window.ManagedMediaSource)||window.MediaSource||window.ManagedMediaSource;
 const managedMSE=!!MS&&MS===window.ManagedMediaSource;
-const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');
-const startCard=$('#startCard'),startBtn=$('#startBtn');
+const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');const startCard=$('#startCard'),startBtn=$('#startBtn');
+const soundCard=$('#soundCard'),soundBtn=$('#soundBtn'),soundClose=$('#soundClose');
+let soundDismissed=false;
+function hideSoundCard(){if(soundCard)soundCard.hidden=true;soundDismissed=true}
 // 页面接入但还没画面时给出"开始投屏"，由车机这边发起 CarPlay 会话（和 CarMode 一致）。
-function showStartCard(){if(startCard&&!shown)startCard.hidden=false}
-function hideStartCard(){if(startCard)startCard.hidden=true}
+function showStartCard(){if(startCard&&!shown)startCard.hidden=false;document.body.classList.add('onStart');showMenu()}
+function hideStartCard(){if(startCard)startCard.hidden=true;document.body.classList.remove('onStart')}
+// 菜单按钮：页面一接上就出现（CarMode 那样，待机页也能点开）。
+const menuBtn=$('#menuBtn'),menuPanel=$('#menuPanel');
+function showMenu(){if(menuBtn)menuBtn.hidden=false}
+let manualStop=false,fitFill=preference('localStorage','carwithin.fit')==='fill';
+function applyFit(){
+ const v=fitFill?'fill':'contain';
+ if(video)video.style.objectFit=v;
+ if(view)view.style.objectFit=v;
+ const item=$('#miFit');
+ if(item)item.textContent=fitFill?'画面适应 · 铺满屏幕':'画面适应 · 保持比例';
+}
+applyFit();
+if(menuBtn){
+ menuBtn.onclick=function(e){e.stopPropagation();menuPanel.hidden=!menuPanel.hidden};
+ document.addEventListener('click',function(e){
+  if(!menuPanel.hidden&&!menuPanel.contains(e.target)&&e.target!==menuBtn)menuPanel.hidden=true;
+ });
+ $('#miFull').onclick=function(){
+  menuPanel.hidden=true;
+  toggleFullscreen();
+ };
+ $('#miAudio').onclick=function(){
+  menuPanel.hidden=true;
+  if(audioPlaying()){
+   // 再点一次就关掉：挂起 AudioContext，顺便让 iPhone 停止送音频。
+   soundDismissed=true;
+   try{audioContext.suspend()}catch(e){}
+   audioStateChanged();
+  }else{
+   soundDismissed=false;ensureAudioPlayback(true);
+  }
+ };
+ $('#miRefit').onclick=function(){
+  menuPanel.hidden=true;setStatus('正在按当前窗口尺寸重新连接 CarPlay…');
+  sendDisplay();send({type:'refit'});
+ };
+ $('#miFit').onclick=function(){menuPanel.hidden=true;fitFill=!fitFill;applyFit();preference('localStorage','carwithin.fit',fitFill?'fill':'contain')};
+ $('#miDisconnect').onclick=function(){
+  menuPanel.hidden=true;manualStop=true;clearTimeout(retryTimer);retryTimer=0;
+  try{ws.close()}catch(e){}
+  shown=false;setStatus('已断开本浏览器，刷新页面可重新连接','bad');
+ };
+}
 if(startBtn){
  startBtn.onclick=function(){
   hideStartCard();setStatus('已请求开始投屏，正在连接 CarPlay…');
   send({type:'startProjection'});
   window.setTimeout(function(){if(!shown)showStartCard()},12000);
  };
+}
+if(soundBtn){
+ // 手势里创建并 resume AudioContext；Chromium 53 在无手势时会一直挂起。
+ soundBtn.onclick=function(){ensureAudioPlayback(true)};
+}
+if(soundClose){
+ soundClose.onclick=function(){hideSoundCard()};
 }
 function preference(storage,key,value){
  try{const store=window[storage];if(value===undefined)return store.getItem(key);store.setItem(key,value)}catch(e){}
@@ -153,7 +252,7 @@ function paintJPEG(bytes){
 // Clock sync with CarWithin (µs): offset = server − client, best of the lowest-RTT samples.
 let clockOffset=null,bestRtt=Infinity,bestAt=0,latencies=[];
 const nowUs=()=>performance.now()*1000;
-function setStatus(text,state=''){label.textContent=text;statusEl.classList.toggle('ok',state==='ok');statusEl.classList.toggle('bad',state==='bad')}
+function setStatus(text,state=''){statusEl.hidden=false;label.textContent=text;statusEl.classList.toggle('ok',state==='ok');statusEl.classList.toggle('bad',state==='bad')}
 function send(o){if(ws&&ws.readyState===1)ws.send(JSON.stringify(o))}
 function report(type,text){send({type,text:String(text).slice(0,300)})}
 // At most one request a second: every forced IDR is ~10× a normal frame, so asking faster than
@@ -167,10 +266,13 @@ const AudioContextClass=window.AudioContext||window.webkitAudioContext;
 const mseAudioClock=new Map(),activeAudio=new Set(),audioSchedule=new Map();
 let audioContext=null,audioOffered=false,audioPackets=[],videoStamp=null,videoStampAt=0;
 let audioGestureTimer=0;
-function audioPlaying(){return audioOffered&&audioContext&&audioContext.state==='running'}
-function canStartAudio(){return audioOffered&&shown&&(useWebCodecs||!video.paused)&&!document.hidden}
+let audioRx=0;
+// 能不能出声只取决于这台浏览器有没有 Web Audio，不再看服务端那个 browserAudio 标志——
+// 那个标志一旦是 false，菜单里"在车机播放声音"就永远点了没反应（用户实测就是这样）。
+function audioPlaying(){return !!AudioContextClass&&!!audioContext&&audioContext.state==='running'}
+function canStartAudio(){return !!AudioContextClass&&!document.hidden}
 let audioDropped=0;
-function requestAudio(){if(receiverReady)send({type:'audio',enabled:canStartAudio()&&audioPlaying()})}
+function requestAudio(){if(receiverReady)send({type:'audio',enabled:audioPlaying()})}
 function clearAudio(){
  audioPackets=[];audioSchedule.clear();audioDropped=0;videoStamp=null;mseAudioClock.clear();
  for(const source of activeAudio){try{source.stop()}catch(e){}}
@@ -179,15 +281,15 @@ function clearAudio(){
 function audioStateChanged(){
  clearTimeout(audioGestureTimer);audioGestureTimer=0;
  requestAudio();
- if(!canStartAudio()||!audioContext||audioPlaying()){
-  enableAudio.hidden=true;
- }else if(enableAudio.hidden){
-  // resume() can stay pending until the browser receives a user gesture.
-  audioGestureTimer=setTimeout(()=>{enableAudio.hidden=!canStartAudio()||audioPlaying()},300);
- }
+ const want=canStartAudio()&&!audioPlaying();
+ if(enableAudio)enableAudio.hidden=!want;
+ if(soundCard)soundCard.hidden=!want||soundDismissed;
+ const item=$('#miAudio');
+ if(item)item.textContent=audioPlaying()?'在车机播放声音 · 已开启':'在车机播放声音';
 }
-function ensureAudioPlayback(fromGesture=false){
- if(!canStartAudio()||!AudioContextClass){audioStateChanged();return}
+function ensureAudioPlayback(fromGesture){
+ if(!AudioContextClass){audioStateChanged();return}
+ if(!fromGesture&&!canStartAudio()){audioStateChanged();return}
  try{
   if(!audioContext){
    audioContext=new AudioContextClass();
@@ -203,13 +305,15 @@ function ensureAudioPlayback(fromGesture=false){
   audioOffered=false;audioStateChanged();
  }
 }
-enableAudio.onclick=()=>ensureAudioPlayback(true);
+if(enableAudio)enableAudio.onclick=()=>ensureAudioPlayback(true);
 function packetTimestamp(u){
  const time=new DataView(u.buffer,u.byteOffset+1,8);
  return time.getUint32(0)*4294967296+time.getUint32(4);
 }
 function onAudioPacket(u){
- if(!audioPlaying()||u.length<17||document.hidden)return;
+ if(u.length<17||document.hidden)return;
+ audioRx++;
+ if(!audioPlaying())return;
  audioPackets.push({u,stamp:packetTimestamp(u),arrival:performance.now()/1000});
  if(audioPackets.length>180){audioPackets.shift();audioDropped++}
 }
@@ -322,6 +426,7 @@ function teardown(){
 }
 function restart(reason,notify=true){
  if(retryTimer)return;
+ if(manualStop){setStatus('已断开本浏览器，刷新页面可重新连接','bad');return}
  if(notify)report('error',reason);
  holdFrame();teardown();
  // Exponential backoff with ±20% jitter so several viewers do not reconnect in lockstep.
@@ -346,12 +451,12 @@ const hex2=n=>{const s=n.toString(16);return s.length<2?'0'+s:s};
 const viewerHex=Array.from(viewerBytes,b=>hex2(b)).join('');
 const viewerID=viewerHex.replace(/^(........)(....)(....)(....)(............)$/,'$1-$2-$3-$4-$5');
 function connect(){
- setStatus('正在连接 CarWithin…');
+ setStatus('正在连接 YCarWith…');
  ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/stream`);ws.binaryType='arraybuffer';
  ws.onopen=()=>{
   ping();
   const ready=()=>{
-   receiverReady=true;setStatus('已连接，正在等待画面');
+   receiverReady=true;setStatus('已连接，正在等待画面');showMenu();
    // 会话已经在跑（页面马上会收到 format）就不弹"开始投屏"，否则给一个发起入口。
    window.setTimeout(function(){if(!fmt&&!shown)showStartCard()},1200);
    const decoder=useJPEG?'jpeg':useWebCodecs?'webcodecs':'mse';
@@ -369,7 +474,7 @@ function onText(m){
   if(PERF[m.perf]){perfMode=m.perf;P=PERF[m.perf]}
   showTouches=!!m.showTouches;audioOffered=!!m.audio;ensureAudioPlayback();
   // Plain HTTP cannot run WebCodecs; offer the HTTPS page when CarWithin serves one.
-  if(!canWebCodecs&&location.protocol==='http:'&&m.securePort>0){fastLink.href='/https-setup';fastLink.hidden=false}
+  if(fastLink&&!canWebCodecs&&location.protocol==='http:'&&m.securePort>0){fastLink.href='/https-setup';fastLink.hidden=false}
   return}
  if(m.type==='pong'){
   if(typeof m.t0!=='number')return;
@@ -388,8 +493,11 @@ function ping(){if(ws&&ws.readyState===1)send({type:'ping',t0:nowUs()})}
 setInterval(ping,1000);
 function firstFrame(){
  if(shown)return;shown=true;attempt=0;hold.hidden=true;clearTimeout(firstFrameTimer);hideStartCard();
- if(fmt)setStatus(`CarPlay ${fmt.width}×${fmt.height} · ${fmt.fps} · ${fmt.name} · ${connectionProtocol}`,'ok');wake();
- if(useWebCodecs)ensureAudioPlayback();
+ if(fmt)setStatus(`CarPlay ${fmt.width}×${fmt.height} · ${fmt.fps} · ${fmt.name} · ${connectionProtocol}`,'ok');
+ // 按用户要求：出画后不再显示"分辨率 · 帧数 · 编码"那行，整条状态只留给报错用。
+ statusEl.hidden=true;wake();
+ // JPEG 兼容模式也要试着开声音：能做到就自动出声，做不到就把"开启声音"页推出来。
+ ensureAudioPlayback();
 }
 function tryMSE(m,reason){
  if(!useWebCodecs||!canMSE||!MS.isTypeSupported('video/mp4; codecs="'+m.codec+'"'))return false;
@@ -434,7 +542,7 @@ function configureWC(m){
   wcConfiguring=false;wcPending=[];
   if(tryMSE(m,'低延迟解码不可用'))return;
   report('error','WebCodecs 不可用：'+e.message);teardown();
-  setStatus(m.name==='H.265'?'此浏览器无法播放 H.265。请在 CarWithin 改用 H.264 后重启 CarPlay。':'此浏览器无法解码当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
+  setStatus(m.name==='H.265'?'此浏览器无法播放 H.265。请在 YCarWith 改用 H.264 后重启 CarPlay。':'此浏览器无法解码当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
   retryTimer=setTimeout(()=>{retryTimer=0;boot()},15000);
  });
 }
@@ -545,7 +653,7 @@ function formatMSE(m){
  report('info',`${navigator.userAgent.slice(0,140)}；MSE ${m.codec} 支持=${ok}`);
  if(!ok){
   report('error',`不支持 ${mime}`);holdFrame();teardown();
-  setStatus(m.name==='H.265'?'此浏览器不支持 H.265。请在 CarWithin 改用 H.264 后重启 CarPlay。':'此浏览器不支持当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
+  setStatus(m.name==='H.265'?'此浏览器不支持 H.265。请在 YCarWith 改用 H.264 后重启 CarPlay。':'此浏览器不支持当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
   // Retry slowly: once the iPhone switches codec this page recovers by itself.
   if(!retryTimer)retryTimer=setTimeout(()=>{retryTimer=0;boot()},15000);return}
  try{source=media.addSourceBuffer(mime)}catch(e){restart('无法创建解码器：'+e.message);return}
@@ -668,18 +776,62 @@ function sendFingers(){
  for(const f of fingers.values())points.push({id:f.id,x:Math.max(0,Math.min(1,(f.cx-p.x0)/p.w)),y:Math.max(0,Math.min(1,(f.cy-p.y0)/p.h))});
  send({type:'touches',points});
 }
-touchLayer.addEventListener('pointerdown',e=>{
+function pressPoint(key,cx,cy){
  if(fingers.size>=10)return;
- try{touchLayer.setPointerCapture(e.pointerId)}catch(_){}
- const f={id:nextFingerId,cx:e.clientX,cy:e.clientY,dot:null};nextFingerId=(nextFingerId+1)&255;
+ const f={id:nextFingerId,cx,cy,dot:null};nextFingerId=(nextFingerId+1)&255;
  if(showTouches){f.dot=document.createElement('div');f.dot.className='tp';document.body.appendChild(f.dot);moveDot(f)}
- fingers.set(e.pointerId,f);
- sendFingers();e.preventDefault();wake();
-});
+ fingers.set(key,f);sendFingers();wake();
+}
+function movePoint(key,cx,cy){const f=fingers.get(key);if(!f)return;f.cx=cx;f.cy=cy;moveDot(f);sendFingers()}
+function liftPoint(key){const f=fingers.get(key);if(!f)return;if(f.dot)f.dot.remove();fingers.delete(key);sendFingers()}
+// 车机是 Crosswalk 23 / Chromium 53：没有 Pointer Events，而且触摸层在老浏览器上曾经因为没有宽高
+// 变成 0×0。这里不再依赖任何图层的尺寸，直接在 document 上抓手指：
+// 只要落点不是页面自己的按钮/菜单，就一律转发成 CarPlay 的触摸（CarMode 就是这么点的）。
+const CONTROL_SEL='button,#menuBtn,#menuPanel,#soundCard,#startCard,#exitCard,a.chip';
+function onControlAt(cx,cy){
+ let el=null;
+ try{el=document.elementFromPoint(cx,cy)}catch(e){}
+ return !!(el&&el.closest&&el.closest(CONTROL_SEL));
+}
+function bindTouchInput(){
+ const changed=e=>Array.prototype.slice.call(e.changedTouches||[]);
+ if(window.PointerEvent){
+  document.addEventListener('pointerdown',e=>{
+   if(!menuPanel.hidden)return;
+   if(e.pointerType==='mouse'&&e.button!==0)return;
+   if(onControlAt(e.clientX,e.clientY))return;
+   pressPoint('p'+e.pointerId,e.clientX,e.clientY);
+   if(e.cancelable)e.preventDefault();
+  },true);
+  document.addEventListener('pointermove',e=>movePoint('p'+e.pointerId,e.clientX,e.clientY),true);
+  ['pointerup','pointercancel','lostpointercapture'].forEach(n=>document.addEventListener(n,e=>liftPoint('p'+e.pointerId),true));
+  return;
+ }
+ document.addEventListener('touchstart',e=>{
+  if(!menuPanel.hidden)return;
+  let onControl=false;
+  for(const t of changed(e)){
+   if(onControlAt(t.clientX,t.clientY)){onControl=true;continue}
+   pressPoint('t'+t.identifier,t.clientX,t.clientY);
+  }
+  if(!onControl&&e.cancelable)e.preventDefault();
+ },{passive:false,capture:true});
+ document.addEventListener('touchmove',e=>{
+  for(const t of changed(e))movePoint('t'+t.identifier,t.clientX,t.clientY);
+ },{passive:false,capture:true});
+ ['touchend','touchcancel'].forEach(n=>document.addEventListener(n,e=>{
+  for(const t of changed(e))liftPoint('t'+t.identifier);
+ },{passive:false,capture:true}));
+ // 老浏览器还可能只报鼠标事件（外接鼠标/触控板），再兜一层。
+ document.addEventListener('mousedown',e=>{
+  if(!menuPanel.hidden||e.button!==0||onControlAt(e.clientX,e.clientY))return;
+  pressPoint('m',e.clientX,e.clientY);
+ },true);
+ document.addEventListener('mousemove',e=>{if(fingers.has('m'))movePoint('m',e.clientX,e.clientY)},true);
+ document.addEventListener('mouseup',()=>liftPoint('m'),true);
+}
+bindTouchInput();
 function moveDot(f){if(f.dot){f.dot.style.left=f.cx+'px';f.dot.style.top=f.cy+'px'}}
-touchLayer.addEventListener('pointermove',e=>{const f=fingers.get(e.pointerId);if(!f)return;f.cx=e.clientX;f.cy=e.clientY;moveDot(f);sendFingers()});
-function lift(e){const f=fingers.get(e.pointerId);if(!f)return;if(f.dot)f.dot.remove();fingers.delete(e.pointerId);sendFingers()}
-['pointerup','pointercancel','lostpointercapture'].forEach(n=>touchLayer.addEventListener(n,lift));
 touchLayer.addEventListener('contextmenu',e=>e.preventDefault());
 document.addEventListener('mousemove',wake);
 document.addEventListener('visibilitychange',()=>{
@@ -688,13 +840,75 @@ document.addEventListener('visibilitychange',()=>{
  if(document.hidden&&fingers.size){fingers.forEach(f=>{if(f.dot)f.dot.remove()});fingers.clear();send({type:'touches',points:[]})}
  if(!document.hidden&&useWebCodecs&&decoder){wcWaiting=true;askKey('页面回到前台')}
 });
-$('#full').onclick=()=>{const d=document.documentElement;(d.requestFullscreen||d.webkitRequestFullscreen||(()=>{})).call(d)};
+if($('#full'))$('#full').onclick=()=>toggleFullscreen();
 function isFullscreen(){return !!(document.fullscreenElement||document.webkitFullscreenElement)}
-function fullscreenChanged(){document.body.classList.toggle('fullscreen',isFullscreen());wake()}
+function pseudoFull(){return document.body.classList.contains('pseudoFull')}
+function setPseudoFull(on){document.body.classList.toggle('pseudoFull',on);document.body.classList.toggle('fullscreen',on||isFullscreen())}
+function enterFullscreen(){
+ armBackGuard();
+ const d=document.documentElement;
+ try{
+  const fn=d.requestFullscreen||d.webkitRequestFullscreen||d.mozRequestFullScreen||d.msRequestFullscreen;
+  if(fn)fn.call(d);
+ }catch(e){}
+ // Crosswalk 23 常常不实现 Fullscreen API（请求了也没反应）。600ms 内没进全屏就退回
+ // "整页铺满"模式，至少让菜单里的"退出全屏"和车机返回键都有确定的行为。
+ window.setTimeout(function(){if(!isFullscreen()&&!document.hidden)setPseudoFull(true)},600);
+}
+function exitFullscreenNow(){
+ try{
+  const fn=document.exitFullscreen||document.webkitExitFullscreen||document.mozCancelFullScreen||document.msExitFullscreen;
+  if(fn)fn.call(document);
+ }catch(e){}
+ if(pseudoFull())setPseudoFull(false);
+}
+function toggleFullscreen(){
+ if(isFullscreen()||pseudoFull())exitFullscreenNow();else enterFullscreen();
+}
+function fullscreenChanged(){
+ const on=isFullscreen()||pseudoFull();
+ document.body.classList.toggle('fullscreen',on);
+ const item=$('#miFull');if(item)item.textContent=on?'退出全屏':'进入全屏';
+ wake();
+ // 全屏切换不再上报窗口尺寸：那会让 CarPlay 按新尺寸重连，退出全屏时画面会黑一下。
+}
 document.addEventListener('fullscreenchange',fullscreenChanged);
 document.addEventListener('webkitfullscreenchange',fullscreenChanged);
-$('#statsButton').onclick=()=>{statsEl.hidden=!statsEl.hidden;preference('localStorage','carplays.stats',statsEl.hidden?'0':'1')};
-if(preference('localStorage','carplays.stats')==='1'||debug)statsEl.hidden=false;
+// 车机的物理返回键 / 浏览器的后退按钮，在网页里都表现为 history 后退。
+// 压一个哨兵条目把后退吃掉：全屏时先退全屏；已经到最后一步则弹"确认/取消"，
+// 只有点确认才断开投屏并退出界面（取消就继续看）。
+let backGuard=false,leaving=false;
+function armBackGuard(){if(backGuard)return;backGuard=true;try{history.pushState({cwBack:1},'')}catch(e){}}
+function askExit(){const c=$('#exitCard');if(c)c.hidden=false;wake()}
+function finishExit(){
+ leaving=true;manualStop=true;
+ try{ws.close()}catch(e){}
+ const c=$('#exitCard');if(c)c.hidden=true;
+ if(fingers.size){fingers.forEach(f=>{if(f.dot)f.dot.remove()});fingers.clear()}
+ clearAudio();
+ document.body.classList.add('exited');
+ try{history.replaceState({},'')}catch(e){}
+}
+window.addEventListener('popstate',function(){
+ if(leaving)return;
+ if(isFullscreen()||pseudoFull()){
+  exitFullscreenNow();
+  try{history.pushState({cwBack:1},'')}catch(e){}
+  return;
+ }
+ try{history.pushState({cwBack:1},'')}catch(e){}
+ askExit();
+});
+if($('#exitCancel'))$('#exitCancel').onclick=function(){const c=$('#exitCard');if(c)c.hidden=true};
+if($('#exitConfirm'))$('#exitConfirm').onclick=finishExit;
+// 退出投屏后给一个"刷新页面"按钮，不用再去点浏览器工具栏的刷新。
+if($('#exitedRefresh'))$('#exitedRefresh').onclick=function(){location.reload()};
+armBackGuard();
+// 用户要求：车机屏幕上不要挂那坨黑色统计（HTTP/JPEG、fps、音频缓冲…）。
+// 永久隐藏，同时把之前存在 localStorage 里的开关也清掉，免得升级后又被打开。
+statsEl.hidden=true;
+statsEl.style.display='none';
+try{preference('localStorage','carplays.stats','0')}catch(e){}
 if(!canWebCodecs&&location.protocol==='https:')report('info','HTTPS 页面但浏览器没有 WebCodecs，使用 MSE');
 
 // ---------- screen report ----------
@@ -724,7 +938,13 @@ function sendDisplay(){
 probeH265().then(v=>{h265Ok=v;sendDisplay()});
 measureRefresh();
 window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(sendDisplay,1500)});
-boot();
+// 老车机上任何一句抛错都会让整页停在"播放器未能启动"。这里把错误抓到状态条上报出来，
+// 页面还能继续跑（最多丢一个功能），不再是整页黑屏。
+window.addEventListener('error',function(ev){
+ try{report('error','页面脚本错误：'+(ev.message||'unknown')+' @'+(ev.lineno||0))}catch(e){}
+ setStatus('页面出错：'+(ev.message||'unknown'),'bad');
+});
+try{boot()}catch(e){setStatus('播放器启动失败：'+(e&&e.message?e.message:e),'bad');report('error','播放器启动失败：'+(e&&e.message?e.message:e))}
 </script></body></html>
 """#.utf8)
 }

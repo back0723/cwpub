@@ -108,6 +108,8 @@ final class VideoOutputServer {
     var onControl: ((CarPlayControl) -> Void)?
     /// 车机页面点了"开始投屏"：由页面发起 CarPlay 会话（CarMode 的做法）。
     var onStartRequest: ((String) -> Void)?
+    /// 车机页面点了"按新尺寸重新适配"：按当前窗口尺寸重连 CarPlay（CarMode 同名功能）。
+    var onRefitRequest: ((String) -> Void)?
     var onKeyframeRequest: ((String) -> Void)?
     /// The primary page's screen changed or the primary page disconnected.
     var onDisplay: ((BrowserDisplay?, UUID?) -> Void)?
@@ -116,10 +118,14 @@ final class VideoOutputServer {
     private var performance: BrowserPerformance = .auto
     private var showTouches = false
     private var browserAudio = false
+    /// Diagnostic latch: log once when the first audio packet actually reaches a page.
+    private var audioForwarded = 0
     private var hls: CarPlayHLS?
     /// Decodes H.264/H.265 into standalone JPEGs for old browsers that cannot survive without
     /// repeated IDR keyframes (Chromium 53 head units). Shared by all JPEG viewers.
-    private let jpegEncoder = BrowserJPEGEncoder()
+    // 车机是 1GB RAM 的安卓 4.2：每帧 JPEG 的尺寸和帧率直接决定它卡不卡。
+    // 30fps 原尺寸它扛不住，这里降到 15fps + 1280 宽上限（页面 canvas 再放大到满屏）。
+    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.45, maximumFPS: 15)
     var onAirPlayReady: ((UUID) -> Void)?
 
     private var viewerCount: Int { clients.values.filter { $0.mode != .request }.count }
@@ -181,12 +187,18 @@ final class VideoOutputServer {
         samples.withUnsafeBytes { packet.append(contentsOf: $0) }
         let wire = packet
         queue.async { [weak self] in
-            guard let self, self.browserAudio else { return }
-            // Video can wait for the next keyframe while the same connection still has
-            // capacity for audio. Only the actual socket backlog limits audio writes.
+            // 原来这里还卡了一道 self.browserAudio：JPEG 兼容画面下这个标志偶尔是 false，
+            // 结果音频永远送不出去。真正该判的是"页面要不要"。
+            guard let self else { return }
+            var delivered = 0
             for client in Array(self.clients.values) where client.wantsAudio && client.streamStarted
                 && client.pendingBytes < self.skipPendingBytes {
                 self.sendWebSocket(wire, opcode: 2, to: client)
+                delivered += 1
+            }
+            if delivered > 0, self.audioForwarded == 0 {
+                self.audioForwarded = 1
+                self.onLog?("开始向车机页面送出音频（\(delivered) 个客户端）")
             }
         }
     }
@@ -417,6 +429,12 @@ final class VideoOutputServer {
         } catch { close(client, reason: "\(client.peer) 协议错误：\(error.localizedDescription)") }
     }
 
+    /// 有没有车机页面在要声音。CarLife 模式下没有页面在听，这时音频要留给手机上本地播放，
+    /// 否则声音既不上车机、也不出手机，等于全程静音（日志里"有画面但没有声音"就是这样）。
+    var hasAudioViewers: Bool {
+        queue.sync { clients.values.contains { $0.wantsAudio } }
+    }
+
     private func handleText(_ text: String, client: Client) throws {
         guard let data = text.data(using: .utf8),
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -454,7 +472,14 @@ final class VideoOutputServer {
             sendJSON(["type": "status", "text": "已连接 CarWithin，正在等待关键帧"], to: client)
             replayGOP(to: client)
         case "audio":
-            client.wantsAudio = client.usesAudioClock && object["enabled"] as? Bool == true
+            let wants = object["enabled"] as? Bool == true
+            if wants != client.wantsAudio {
+                client.wantsAudio = wants
+                // 页面点了"开启声音"才会变成 true；音频流没建起来时这行也会照常打出来，
+                // 便于区分"页面没开"和"iPhone 没送音频"。
+                onLog?("\(client.peer) 网页声音：\(wants ? "开启" : "关闭")")
+            }
+            if !browserAudio { onLog?("\(client.peer) 本期未向页面送出音频（browserAudio=false）") }
         case "jpeg":
             // Old-browser fallback: switch this viewer to standalone JPEG pictures. No keyframe
             // is needed because each JPEG is a full image. Prepare the decoder from cached SPS/PPS.
@@ -501,6 +526,9 @@ final class VideoOutputServer {
             // 车机页面上的"开始投屏"按钮：请求会话由页面发起，和 CarMode 的入口一致。
             onLog?("\(client.peer) 在车机页面上点了“开始投屏”")
             onStartRequest?(client.peer)
+        case "refit":
+            onLog?("\(client.peer) 在车机页面上点了“按新尺寸重新适配”")
+            onRefitRequest?(client.peer)
         case "display":
             guard client.browserReady else { break }
             func int(_ key: String) -> Int? { (object[key] as? NSNumber)?.intValue }

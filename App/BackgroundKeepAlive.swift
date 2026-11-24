@@ -24,6 +24,9 @@ final class BackgroundKeepAlive {
     private var observers: [NSObjectProtocol] = []
     private var watchdog: Timer?
     private var restarts = 0
+    /// 通話/微信語音發起中時讓出音頻，否則反覆 setActive(true) 會把別人的通話掐掉。
+    private var suppressing = false
+    private var lastReviveAt = Date.distantPast
     private(set) var isRunning = false
     var onLog: ((String) -> Void)?
 
@@ -45,10 +48,18 @@ final class BackgroundKeepAlive {
         let center = NotificationCenter.default
         observers = [
             center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
-                guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                      AVAudioSession.InterruptionType(rawValue: raw) == .ended else { return }
+                guard let self, let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+                if type == .began {
+                    // 来电话 / 微信语音 / FaceTime：立刻让出音频会话，并且在通话期间不再抢回来。
+                    self.suppressing = true
+                    self.player?.pause()
+                    self.onLog?("通话接手音频，后台保持暂停（通话期间不抢占）")
+                    return
+                }
                 // Resume whether or not iOS sets shouldResume: staying silent means being suspended.
-                self?.revive(reason: "音频中断结束")
+                self.suppressing = false
+                self.revive(reason: "音频中断结束")
             },
             center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
                 // Every player is invalid after a media services reset; build a new one.
@@ -84,6 +95,13 @@ final class BackgroundKeepAlive {
 
     private func revive(reason: String) {
         guard isRunning else { return }
+        // 通话/微信语音占用期间一律让出：之前每次 routeChange 都 setActive(true)，
+        // 十几次连抢把打电话的应用掐断，表现就是“微信电话自动挂断”。
+        if suppressing { return }
+        if AVAudioSession.sharedInstance().isOtherAudioPlaying { return }
+        // 事件会成串来（一次路由变化 + 看门狗），节流到 2 秒内最多抢一次。
+        guard Date().timeIntervalSince(lastReviveAt) >= 2 else { return }
+        lastReviveAt = Date()
         restarts += 1
         let ok = play(reason: reason)
         // Log the first few and then every 10th so a flapping session cannot flood the log.
@@ -95,6 +113,8 @@ final class BackgroundKeepAlive {
     private func play(reason: String?) -> Bool {
         do {
             let session = AVAudioSession.sharedInstance()
+            // 恢复路径上如果别人（通话/微信语音/音乐）已经在放，就别再 setActive 去抢。
+            if reason != nil && session.isOtherAudioPlaying { return false }
             if reason == nil {
                 onLog?("后台保持准备：类别 \(session.category.rawValue)，模式 \(session.mode.rawValue)，选项 \(session.categoryOptions.rawValue)，路由 \(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","))")
             }

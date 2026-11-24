@@ -71,12 +71,16 @@ final class SameDeviceProbe {
         // iOS 16 sometimes refuses the Wi-Fi group (wrong SSID/channel makes it try to switch
         // networks and drop the request). Same-device installs are already on the LAN, so the
         // plain address form is tried as well.
-        let wifi = wireless
+        // 个人热点模式下目标地址换成 127.0.0.1：自己的 Wi-Fi 在 AP 模式，连 172.20.10.1 连不通；
+        // 这种模式下也不再带 Wi-Fi 组，否则 iOS 会尝试“切网”到自己的热点。
+        let target = configuration.carPlayTargetAddress
+        let loopback = target != configuration.address
+        let wifi = (wireless && !loopback)
             ? try AccessoryMessages.WiFi(ssid: configuration.ssid, password: configuration.password, channel: configuration.wifiChannel)
             : nil
-        try send(AccessoryMessages.startSession(address: configuration.address, port: configuration.port,
+        try send(AccessoryMessages.startSession(address: target, port: configuration.port,
             deviceID: configuration.deviceID, wifi: wifi))
-        stage("已请求在 \(configuration.address):\(configuration.port) 启动 CarPlay（\(wireless ? "含 Wi-Fi 参数" : "仅地址" )），会话正在等待 TCP 连接")
+        stage("已请求在 \(target):\(configuration.port) 启动 CarPlay（\(wifi != nil ? "含 Wi-Fi 参数" : (loopback ? "个人热点模式，本机回环" : "仅地址") )），会话正在等待 TCP 连接")
     }
     private func stage(_ message: String) { onLog?(message); onStage?(message) }
     private func finish(_ message: String) { onLog?(message); stop(); onFinished?(message) }

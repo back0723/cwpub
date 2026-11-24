@@ -101,6 +101,7 @@ final class CarPlayPictureInPicture: NSObject {
         #if os(iOS)
         do {
             let session = AVAudioSession.sharedInstance()
+            if session.isOtherAudioPlaying { return }
             if session.category != .playback && session.category != .playAndRecord {
                 try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }

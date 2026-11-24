@@ -26,6 +26,8 @@ struct ReceiverConfiguration {
     var carLifeEnabled = false
     /// Head unit IPv4 for CarLife discovery; nil sweeps the local network.
     var carLifeAddress: String?
+    /// 把解码后的 PCM 送进 CarLife 的伴音通道，让车机喇叭出声。
+    var carLifeAudio = true
     var zeehoAddress: String?
     var ninebotAddress: String?
     var tailingAddress: String?
@@ -88,6 +90,19 @@ struct ReceiverConfiguration {
         localIPv4Addresses(interface: "en0").first
     }
 
+    /// iPhone 自己开个人热点时的地址：桥接口固定落在 172.20.10.0/28。
+    /// 1.0.1 版本就是靠这个让车机连 iPhone 热点直接投屏，这里补回来。
+    static func hotspotIPv4Address() -> String? {
+        localIPv4Addresses().first(where: { $0.hasPrefix("172.20.10.") })
+    }
+
+    static var personalHotspotActive: Bool { hotspotIPv4Address() != nil }
+
+    /// 能用上的局域网地址：优先路由器 Wi-Fi，其次个人热点。
+    static func lanIPv4Address() -> String? {
+        wifiIPv4Address() ?? hotspotIPv4Address()
+    }
+
     static func localIPv4Addresses(interface: String? = nil) -> [String] {
         var first: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&first) == 0 else { return [] }
@@ -110,6 +125,13 @@ struct ReceiverConfiguration {
             }
         }
         return result
+    }
+
+    /// 能与 CarPlay 接上的本机地址。个人热点模式下 iPhone 的 Wi-Fi 射频处于 AP 模式，
+    /// 它自己连 172.20.10.1 是连不通的（日志里就是一直「会话正在等待 TCP 连接」），
+    /// 只能用本机回环地址，CarPlay 会话本来就在这台手机上。
+    var carPlayTargetAddress: String {
+        ReceiverConfiguration.hotspotIPv4Address() == address ? "127.0.0.1" : address
     }
 
     static func persistentDeviceID() -> String {
@@ -174,6 +196,9 @@ struct ReceiverConfiguration {
             }
         }
         guard requiresWiFiCredentials else { return }
+        // 个人热点模式：iPhone 自己就是热点，不存在“要加入的 Wi-Fi 名称”，
+        // 车机直接连热点访问本机地址即可，所以不再强制要 SSID。
+        if Self.personalHotspotActive, ssid.isEmpty { return }
         guard !ssid.isEmpty, ssid.utf8.count <= 32 else {
             throw ConfigurationError(ssid.isEmpty ? "启动前请输入 Wi-Fi 名称。" : "Wi-Fi 名称不能超过 32 个 UTF-8 字节。")
         }

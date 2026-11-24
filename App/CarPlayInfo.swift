@@ -76,6 +76,9 @@ enum CarPlayInfo {
                 (100, "telephony", 0x70000150, 0x70000150),
                 (100, "speechRecognition", 0x20000040, 0x20000040),
                 (101, "default", 0x40008800, 0),
+                // type 102 是无线 CarPlay 的媒体音频通道，不能省：去掉它 iPhone 会直接不发媒体音频。
+                // v5.26 试过只声明 PCM(0x8800)，iPhone 连 102 的 SETUP 都不发（日志里只剩「已请求媒体流 110，
+                // 音频格式 无」），音乐全留在手机扬声器上，所以声明必须回到 AAC（0xc00000）。
                 (102, "media", 0xc00000, 0)]
             info["audioFormats"] = profiles.map { type, audioType, output, input -> [String: Any] in
                 var entry: [String: Any] = ["type": type, "audioType": audioType, "audioOutputFormats": output]
@@ -124,8 +127,9 @@ enum CarPlayInfo {
     static func knobReport(select: Bool = false, home: Bool = false, back: Bool = false, wheel: Int8 = 0) -> Data {
         Data([(select ? 1 : 0) | (home ? 2 : 0) | (back ? 4 : 0), 0, 0, UInt8(bitPattern: wheel)])
     }
-    /// Indices into the media descriptor's usage array.
-    enum MediaKey: UInt8 { case play = 1, pause = 2, playPause = 3, next = 4, previous = 5 }
+    /// HID 消费类 usage ID（不是数组下标）。0xB0 播放、0xB1 暂停、0xCD 播放/暂停、
+    /// 0xB5 下一曲、0xB6 上一曲。
+    enum MediaKey: UInt8 { case play = 0xb0, pause = 0xb1, playPause = 0xcd, next = 0xb5, previous = 0xb6 }
     /// Indices into the telephony descriptor's usage array.
     enum TelephonyKey: UInt8 { case hookSwitch = 1, flash = 2, drop = 3, mute = 4 }
 
@@ -149,11 +153,12 @@ enum CarPlayInfo {
         0x05,0x01,0x09,0x01,0xa1,0x00,
         0x09,0x30,0x09,0x31,0x15,0x81,0x25,0x7f,0x75,0x08,0x95,0x02,0x81,0x02,0xc0,
         0x09,0x38,0x15,0x81,0x25,0x7f,0x75,0x08,0x95,0x01,0x81,0x06,0xc0])
-    /// Consumer control, 1-byte array: none, Play, Pause, Play/Pause, Next, Previous, AC Search.
+    /// 消费类控制：1 字节上报，**字节值就是 usage ID**。
+    /// 旧写法是"usage 数组 + 0x0000 占位 + 逻辑 0…6"，上报值到底按 0 起还是 1 起解释是含糊的：
+    /// 按 0 起算 3 是 0xCD（播放/暂停），按 1 起算是 0xB1（暂停），把占位项剔掉就变成 0xB5（下一曲）。
+    /// 实测"暂停后再点播放"被 iPhone 当成下一曲，就是踩在这个含糊上。改成标准写法后值即用法。
     private static let mediaDescriptor = Data([
-        0x05,0x0c,0x09,0x01,0xa1,0x01,0x15,0x00,0x25,0x06,0x05,0x0c,
-        0x0a,0x00,0x00,0x0a,0xb0,0x00,0x0a,0xb1,0x00,0x0a,0xcd,0x00,
-        0x0a,0xb5,0x00,0x0a,0xb6,0x00,0x0a,0x9e,0x02,
+        0x05,0x0c,0x09,0x01,0xa1,0x01,0x15,0x00,0x26,0xff,0x00,0x19,0x00,0x2a,0xff,0x00,
         0x75,0x08,0x95,0x01,0x81,0x00,0xc0])
     /// Telephony, 1-byte array: none, Hook Switch, Flash, Drop, Mute, keypad 0–9 * #, keyboard delete.
     private static let telephonyDescriptor = Data([
