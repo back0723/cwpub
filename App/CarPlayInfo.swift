@@ -76,10 +76,11 @@ enum CarPlayInfo {
                 (100, "telephony", 0x70000150, 0x70000150),
                 (100, "speechRecognition", 0x20000040, 0x20000040),
                 (101, "default", 0x40008800, 0),
-                // type 102 是无线 CarPlay 的媒体音频通道，不能省：去掉它 iPhone 会直接不发媒体音频
-                // （日志里只剩「已请求媒体流 110，音频格式 无」）。这里保留 AAC 声明，保证音频流存在；
-                // 解码细节在 NativeAudioDecoder 里处理（包描述字段、LC/ELD 头部都会重试）。
-                (102, "media", 0xc00000, 0)]
+                // type 102 是无线 CarPlay 的媒体音频通道，不能省：去掉它 iPhone 会直接不发媒体音频。
+                // AAC（0xc00000）在真机上无论给 LC 还是 ELD 头部都报 -50，连 735 字节的真音乐帧
+                // 也一包都解不出来（这段解码路已实证走不通），所以这里只要未压缩 PCM：
+                // 0x8800 = 48k 立体声 + 44.1k 立体声，走本机已验证可用的裸 PCM 路径。
+                (102, "media", 0x8800, 0)]
             info["audioFormats"] = profiles.map { type, audioType, output, input -> [String: Any] in
                 var entry: [String: Any] = ["type": type, "audioType": audioType, "audioOutputFormats": output]
                 if input != 0 { entry["audioInputFormats"] = input }

@@ -137,11 +137,14 @@ final class CarPlayAudio {
                 retryPlaybackAt = now + 0.5
                 #if os(iOS)
                 let session = AVAudioSession.sharedInstance()
-                // 通话 / 微信语音期间不能“让出”：那段声音正是要由我们转给车机/本机播放的，
-                // 让出就变成双方都听不到。这里只记一次日志，照常占住会话。
-                if session.isOtherAudioPlaying, !loggedOtherAudio {
-                    loggedOtherAudio = true; onLog?("通话占用音频：本 App 继续接管播放，把对方声音转给车机")
+                // 通话进行中绝不能再改类别 / setActive：v5.25 那样做会把对方的通话直接顶断
+                // （真机日志里就是「双方没声音且自己中断」）。通话期间本机不抢占播放，
+                // 但 PCM 已经在 onPCM 里送给车机通道 3 了，对方的声音仍然会到车机。
+                if session.isOtherAudioPlaying {
+                    if !loggedOtherAudio { loggedOtherAudio = true; onLog?("通话占用音频：本机不抢占播放，声音仍经通道 3 送到车机") }
+                    return
                 }
+                loggedOtherAudio = false
                 let needsDuplexCategory = microphone != nil || Self.hasSpeakerOverride
                 var options: AVAudioSession.CategoryOptions = needsDuplexCategory ? [.defaultToSpeaker] : []
                 if Self.preferBluetoothOutput { options.insert(.allowBluetoothA2DP) }
@@ -459,11 +462,18 @@ private final class NativeMicrophone {
             // 后台播音时系统常把会话留在 .playback（或带 .mixWithOthers），此时开录音必然
             // 报 cannotStartRecording（561145187）。录音前把会话摆回可录状态，并明确用内建麦克风。
             let session = AVAudioSession.sharedInstance()
-            // 正在打电话 / 微信语音：我们本身就是那台“车机”，通话的上下行都必须由我们转，
-            // 所以这里不能再让出（v5.21 的让出正是“对方听不到我、我也听不到对方”的原因）。
-            if session.isOtherAudioPlaying, !loggedWaitingForAudio {
-                loggedWaitingForAudio = true
-                onLog?("检测到通话占用：继续占用音频会话，由本 App 转接通话上下行")
+            // 通话正在进行时：绝不改类别（改了会把通话顶断，真机已复现“双方没声音且自己中断”）。
+            // 只有会话本来就已经是可录状态时才直接装 tap；否则等通话结束再来。
+            if session.isOtherAudioPlaying, session.category != .playAndRecord {
+                if !loggedWaitingForAudio {
+                    loggedWaitingForAudio = true
+                    onLog?("通话占用音频：先不动音频会话（避免顶断通话），通话结束后再开麦克风")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    guard let self, self.active, !self.installedTap else { return }
+                    self.beginCapture()
+                }
+                return
             }
             if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
                 try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
