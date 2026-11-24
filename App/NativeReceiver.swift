@@ -41,6 +41,12 @@ final class NativeReceiver {
     private var keyframeAttempts = 0
     private var keyframeReason = ""
     private var touchSlots = TouchSlots(count: CarPlayInfo.touchContacts)
+    /// 抬起报告是否被压后（见 sendTouch），以及按下时刻/上次日志时刻。
+    private var pendingRelease: [CarPlayInfo.TouchContact]?
+    private var touchDownAt = 0.0
+    private var lastTouchLog = 0.0
+    /// 上一次发出的音乐状态，用来决定"播放/暂停"该明确发哪一个键。
+    private var assumedPlaying = true
     private var displaySize: (width: Int, height: Int)?
     private var nightMode: Bool?
     /// 主线程：最近一次车机网页上报的真实视口（工具栏收起后的全屏尺寸）。
@@ -362,8 +368,44 @@ final class NativeReceiver {
                     y: UInt16(clamping: Int((min(max(entry.y, 0), 1) * Double(max(size.height - 1, 0))).rounded())),
                     down: entry.down)
             }
-            self.activeMedia?.touch(contacts)
+            if contacts.contains(where: { $0.down }),
+               let first = contacts.first(where: { $0.down }),
+               ProcessInfo.processInfo.systemUptime - self.lastTouchLog > 0.5 {
+                self.lastTouchLog = ProcessInfo.processInfo.systemUptime
+                self.log("触控按下 (\(first.x),\(first.y)) / \(size.width)×\(size.height)")
+            }
+            self.sendTouch(contacts)
         }
+    }
+    /// 按下和抬起之间至少隔 80 ms 再上报。太快的一对报告会被 iOS 当成双击/手势，
+    /// 在 CarPlay 的音乐界面上的表现就是"点播放跳到下一曲"。
+    private func sendTouch(_ contacts: [CarPlayInfo.TouchContact]) {
+        flushPendingRelease()
+        guard let media = activeMedia else { return }
+        let pressed = contacts.contains { $0.down }
+        let now = ProcessInfo.processInfo.systemUptime
+        if pressed {
+            touchDownAt = now
+            media.touch(contacts)
+            return
+        }
+        // 还有手指没抬起来时不做延时，避免把别人的手指一起放掉。
+        guard !contacts.isEmpty else { return }
+        let elapsed = now - touchDownAt
+        let hold = 0.08
+        if elapsed < hold {
+            pendingRelease = contacts
+            queue.asyncAfter(deadline: .now() + (hold - elapsed)) { [weak self] in
+                self?.flushPendingRelease()
+            }
+            return
+        }
+        media.touch(contacts)
+    }
+    private func flushPendingRelease() {
+        guard let pending = pendingRelease else { return }
+        pendingRelease = nil
+        activeMedia?.touch(pending)
     }
     func press(_ control: CarPlayControl) {
         queue.async { [weak self] in
@@ -376,7 +418,12 @@ final class NativeReceiver {
             case .knobPrevious: media.pressHID(CarPlayInfo.HID.knob, CarPlayInfo.knobReport(wheel: -1), release: knobUp)
             case .knobNext: media.pressHID(CarPlayInfo.HID.knob, CarPlayInfo.knobReport(wheel: 1), release: knobUp)
             case .previous: media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.previous.rawValue]), release: Data([0]))
-            case .playPause: media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.playPause.rawValue]), release: Data([0]))
+            case .playPause:
+                // 先发标准的"播放/暂停"切换键（usage 0xCD）。描述符已改成"值即 usage"，0xCD 就是播放/暂停，
+                // 不再是旧描述符下被解析成下一曲的那个含糊序号。
+                media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.playPause.rawValue]), release: Data([0]))
+                self.assumedPlaying.toggle()
+                self.log("音乐键：播放/暂停")
             case .next: media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.next.rawValue]), release: Data([0]))
             case .siri: media.requestSiri()
             case .hookSwitch: media.pressHID(CarPlayInfo.HID.telephony, Data([CarPlayInfo.TelephonyKey.hookSwitch.rawValue]), release: Data([0]))

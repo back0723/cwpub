@@ -84,6 +84,8 @@ final class CarPlayAudio {
     var onBrowserAudio: ((AVAudioPCMBuffer, UInt64) -> Void)?
     /// 车机页面上是否真的有人在要声音。返回 false（或未设置）时音频在本机播放。
     var shouldForwardAudio: (() -> Bool)?
+    /// 声音选项选了"车机蓝牙"：本机播放时优先把音频送到车机蓝牙（A2DP），而不是手机扬声器。
+    static var preferBluetoothOutput = false
     init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format
         decoder = try NativeAudioDecoder(format: format)
@@ -123,13 +125,31 @@ final class CarPlayAudio {
                 let session = AVAudioSession.sharedInstance()
                 let needsDuplexCategory = microphone != nil || Self.hasSpeakerOverride
                 var options: AVAudioSession.CategoryOptions = needsDuplexCategory ? [.defaultToSpeaker] : []
+                if Self.preferBluetoothOutput { options.insert(.allowBluetoothA2DP) }
                 if BackgroundKeepAlive.holdsAudioSession { options.insert(.mixWithOthers) }
                 let category: AVAudioSession.Category = needsDuplexCategory ? .playAndRecord : .playback
                 if session.category != category || session.mode != .default || session.categoryOptions != options {
                     try session.setCategory(category, mode: .default, options: options)
                 }
                 try session.setActive(true)
-                if session.currentRoute.outputs.contains(where: { $0.portType == .carAudio }) {
+                if Self.preferBluetoothOutput, microphone == nil {
+                    // 想让车机喇叭出声：先把音频从虚拟 CarPlay 路由上摘下来，交给蓝牙。
+                    if session.category != .playback {
+                        try session.setCategory(.playback, mode: .default, options: options.union(.allowBluetoothA2DP))
+                    }
+                    try? session.overrideOutputAudioPort(.none)
+                    let bluetooth = session.currentRoute.outputs.contains {
+                        $0.portType == .bluetoothA2DP || $0.portType == .bluetoothLE || $0.portType == .bluetoothHFP
+                    }
+                    if bluetooth {
+                        onLog?("音频输出走车机蓝牙：\(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", "))")
+                    } else if session.currentRoute.outputs.contains(where: { $0.portType == .carAudio }) {
+                        try session.setCategory(.playAndRecord, mode: .default, options: options.union(.defaultToSpeaker))
+                        try session.overrideOutputAudioPort(.speaker)
+                        Self.hasSpeakerOverride = true
+                        onLog?("没找到车机蓝牙音频（先在 iPhone 设置里连上），改用 iPhone 扬声器")
+                    }
+                } else if session.currentRoute.outputs.contains(where: { $0.portType == .carAudio }) {
                     // In the same-device session CarAudio is our own virtual CarPlay receiver.
                     // Feeding decoded audio back into that route leaves the physical speaker silent.
                     if session.category != .playAndRecord {

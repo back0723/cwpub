@@ -21,14 +21,14 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.8.5-carmode"
+    static let version = "1.9.0-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <link rel="icon" href="data:,">
-<title>CarWithin</title>
+<title>YCarWith</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#05070b;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
 main{position:relative;width:100%;height:100%}video,canvas{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
@@ -57,6 +57,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 #exitConfirm{border:0;border-radius:12px;padding:11px 26px;font-size:16px;cursor:pointer;background:#0a84ff;color:#fff}
 .exited main,.exited #top,.exited #stats,.exited #touch,.exited #soundCard{display:none}
 #exitedNote{position:fixed;z-index:10;left:0;right:0;top:50%;transform:translateY(-50%);text-align:center;color:#8b9bb4;font-size:16px;display:none}
+#exitedRefresh{display:block;margin:18px auto 0;border:0;border-radius:12px;padding:12px 34px;font-size:17px;cursor:pointer;background:#0a84ff;color:#fff}
 .exited #exitedNote{display:block}
 /* CarMode 的右上角"菜单"：点开是一个白色二级面板（进入全屏 / 在车机播放声音 / 画面适应 / 断开本浏览器）。 */
 /* 起始页的"菜单"：文字蓝色、按钮和边框全透明，位置比原来下移 2cm（CSS 1cm = 37.8px，共约 76px）。 */
@@ -86,7 +87,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 </style>
 </head>
 <body><main><video id="video" muted autoplay playsinline disablepictureinpicture disableremoteplayback></video><canvas id="view" hidden></canvas><canvas id="hold" hidden></canvas><div id="touch"></div></main>
-<div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 CarWithin…</span></div><div class="toolbar">
+<div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 YCarWith…</span></div><div class="toolbar">
   <button id="menuBtn" hidden>菜单</button>
   <div id="menuPanel" hidden>
     <p class="miTitle">浏览器已接入</p>
@@ -104,7 +105,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 <div id="soundCard" hidden><h1>声音还没开</h1><p>点“开启声音”，CarPlay 的声音就从车机喇叭播放。</p><button id="soundBtn">开启声音</button><button id="soundClose" class="sClose">暂不</button></div>
 <button id="startPlayback" hidden>开始播放</button>
 <div id="exitCard" hidden><p>退出投屏？</p><p class="exNote">确认后断开画面和声音，退出投屏界面。</p><div class="exRow"><button id="exitCancel">取消</button><button id="exitConfirm">确认</button></div></div>
-<div id="exitedNote">已退出投屏，刷新页面可重新连接</div>
+<div id="exitedNote"><span>已退出投屏，刷新页面可重新连接</span><button id="exitedRefresh">刷新页面</button></div>
 <script>
 /* This early check uses ES5 so even a restricted WebView can explain why playback cannot start. */
 (function () {
@@ -450,7 +451,7 @@ const hex2=n=>{const s=n.toString(16);return s.length<2?'0'+s:s};
 const viewerHex=Array.from(viewerBytes,b=>hex2(b)).join('');
 const viewerID=viewerHex.replace(/^(........)(....)(....)(....)(............)$/,'$1-$2-$3-$4-$5');
 function connect(){
- setStatus('正在连接 CarWithin…');
+ setStatus('正在连接 YCarWith…');
  ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/stream`);ws.binaryType='arraybuffer';
  ws.onopen=()=>{
   ping();
@@ -541,7 +542,7 @@ function configureWC(m){
   wcConfiguring=false;wcPending=[];
   if(tryMSE(m,'低延迟解码不可用'))return;
   report('error','WebCodecs 不可用：'+e.message);teardown();
-  setStatus(m.name==='H.265'?'此浏览器无法播放 H.265。请在 CarWithin 改用 H.264 后重启 CarPlay。':'此浏览器无法解码当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
+  setStatus(m.name==='H.265'?'此浏览器无法播放 H.265。请在 YCarWith 改用 H.264 后重启 CarPlay。':'此浏览器无法解码当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
   retryTimer=setTimeout(()=>{retryTimer=0;boot()},15000);
  });
 }
@@ -652,7 +653,7 @@ function formatMSE(m){
  report('info',`${navigator.userAgent.slice(0,140)}；MSE ${m.codec} 支持=${ok}`);
  if(!ok){
   report('error',`不支持 ${mime}`);holdFrame();teardown();
-  setStatus(m.name==='H.265'?'此浏览器不支持 H.265。请在 CarWithin 改用 H.264 后重启 CarPlay。':'此浏览器不支持当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
+  setStatus(m.name==='H.265'?'此浏览器不支持 H.265。请在 YCarWith 改用 H.264 后重启 CarPlay。':'此浏览器不支持当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
   // Retry slowly: once the iPhone switches codec this page recovers by itself.
   if(!retryTimer)retryTimer=setTimeout(()=>{retryTimer=0;boot()},15000);return}
  try{source=media.addSourceBuffer(mime)}catch(e){restart('无法创建解码器：'+e.message);return}
@@ -900,6 +901,8 @@ window.addEventListener('popstate',function(){
 });
 if($('#exitCancel'))$('#exitCancel').onclick=function(){const c=$('#exitCard');if(c)c.hidden=true};
 if($('#exitConfirm'))$('#exitConfirm').onclick=finishExit;
+// 退出投屏后给一个"刷新页面"按钮，不用再去点浏览器工具栏的刷新。
+if($('#exitedRefresh'))$('#exitedRefresh').onclick=function(){location.reload()};
 armBackGuard();
 // 用户要求：车机屏幕上不要挂那坨黑色统计（HTTP/JPEG、fps、音频缓冲…）。
 // 永久隐藏，同时把之前存在 localStorage 里的开关也清掉，免得升级后又被打开。
