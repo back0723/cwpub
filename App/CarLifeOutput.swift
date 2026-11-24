@@ -827,7 +827,7 @@ private final class Session {
             audioPlayed = true
             lastPlayAt = .now()
             audioInitLink = linkID
-            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 / 16 位 PCM16（通道 3 已就绪）")
+            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 / 16 位 PCM16（通道 3 已就绪，播放命令=\(String(format: "0x%X", MusicCommand.play))）")
         }
         // 太久没声（切歌/暂停后恢复）时补一次播放命令，免得车机还停在暂停态。
         let now = DispatchTime.now().uptimeNanoseconds
