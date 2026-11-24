@@ -801,14 +801,17 @@ private final class Session {
         // 否则车机那边根本没建 AudioTrack，数据进来也只能丢。
         if audioRate != rate || audioChannels != channelsInBuffer || audioInitLink != linkID {
             audioRate = rate; audioChannels = channelsInBuffer; audioFramesSent = 0
-            let config = channelsInBuffer == 1 ? 4 : 12   // CHANNEL_OUT_MONO / STEREO
-            let initData = CarLifeProtoWriter().number(1, Int64(rate)).number(2, Int64(config)).number(3, 2).data
+            // 车机的 `La/a/b/l/c/d/b;`（AudioParams）把这三个数当成 (sampleRate, channelCount, bitDepth)：
+            //   c() 用 channelCount==1 → CHANNEL_OUT_MONO(4)，否则 STEREO(12)；
+            //   b() 用 bitDepth==16 → ENCODING_PCM_16BIT(2)，否则 FLOAT(3)。
+            // 所以这里必须送"声道数 1/2"和"位深 16"，送 Android 枚举(4/12、2)会被当成 4 声道 + float。
+            let initData = CarLifeProtoWriter().number(1, Int64(rate)).number(2, Int64(channelsInBuffer)).number(3, 16).data
             send(3, MusicCommand.initialize, initData)
             audioInitAt = .now()
             send(3, MusicCommand.play)
             audioPlayed = true
             audioInitLink = linkID
-            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 PCM16（通道 3 已就绪）")
+            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 / 16 位 PCM16（通道 3 已就绪）")
         }
         // 太久没声（切歌/暂停后恢复）时补一次播放命令，免得车机还停在暂停态。
         let now = DispatchTime.now().uptimeNanoseconds
