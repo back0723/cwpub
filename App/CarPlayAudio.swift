@@ -330,8 +330,8 @@ final class NativeAudioDecoder {
         self.format = format
         output = AVAudioFormat(standardFormatWithSampleRate: Double(format.sampleRate), channels: AVAudioChannelCount(format.channels))!
         if format.isAAC {
-            let frequency = format.sampleRate == 44100 ? [0x12, 0x10] : [0x11, 0x90]
-            let elt = format.sampleRate == 44100 ? [0x9D, 0x08] : [0x9C, 0x88]
+            let frequency: [UInt8] = format.sampleRate == 44100 ? [0x12, 0x10] : [0x11, 0x90]
+            let elt: [UInt8] = format.sampleRate == 44100 ? [0x9D, 0x08] : [0x9C, 0x88]
             cookieVariants = [Data(frequency), Data(elt), nil]
         } else if format.isOpus {
             cookieVariants = [nil]
