@@ -71,6 +71,8 @@ final class CarPlayAudio {
     private var underruns = 0
     private var nextStatistics = 0.0
     private var retryPlaybackAt = 0.0
+    /// 通話/其他音頻占用時只記一次日誌，避免每包刷屏。
+    private var loggedOtherAudio = false
     private let feedbackLock = NSLock()
     private var renderedSampleTime: UInt32?
     private var browserClock: (rtp: UInt32, host: UInt64)?
@@ -128,6 +130,13 @@ final class CarPlayAudio {
                 retryPlaybackAt = now + 0.5
                 #if os(iOS)
                 let session = AVAudioSession.sharedInstance()
+                // 通话 / 微信语音正在占用音频时不要去改类别、不要 setActive：
+                // 那会把正在通话的会话顶掉，对方那边直接断线。
+                if session.isOtherAudioPlaying {
+                    if !loggedOtherAudio { loggedOtherAudio = true; onLog?("检测到通话/其他音频占用，暂不抢占音频输出") }
+                    return
+                }
+                loggedOtherAudio = false
                 let needsDuplexCategory = microphone != nil || Self.hasSpeakerOverride
                 var options: AVAudioSession.CategoryOptions = needsDuplexCategory ? [.defaultToSpeaker] : []
                 if Self.preferBluetoothOutput { options.insert(.allowBluetoothA2DP) }
@@ -375,6 +384,7 @@ private final class NativeMicrophone {
     private var converter: AVAudioConverter?
     private var active = true
     private var installedTap = false
+    private var loggedWaitingForAudio = false
     private var pending = Data()
     private var failures = 0
     var onLog: ((String) -> Void)?
@@ -402,6 +412,20 @@ private final class NativeMicrophone {
             // 后台播音时系统常把会话留在 .playback（或带 .mixWithOthers），此时开录音必然
             // 报 cannotStartRecording（561145187）。录音前把会话摆回可录状态，并明确用内建麦克风。
             let session = AVAudioSession.sharedInstance()
+            // 正在打电话 / 微信语音：这时候把类别改成 playAndRecord 会直接掐断那通电话，
+            // 所以先让出，等对方放完再开麦克风。
+            if session.isOtherAudioPlaying {
+                if !loggedWaitingForAudio {
+                    loggedWaitingForAudio = true
+                    onLog?("通话/其他音频正在占用，麦克风先让出，通话结束后自动开启")
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    guard let self, self.active, !self.installedTap else { return }
+                    self.beginCapture()
+                }
+                return
+            }
+            loggedWaitingForAudio = false
             if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
                 try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
             }
