@@ -1110,6 +1110,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         config.carLifeEnabled = outputMode == .carLife
         config.carLifeAudio = carLifeAudioSwitch.isOn
+        log("CarLife 伴音：启动参数 伴音开关=\(carLifeAudioSwitch.isOn ? "开" : "关")，CarLife 模式=\(config.carLifeEnabled ? "开" : "关")，麦克风来源=\(usesPhoneMicrophone ? "iPhone" : "车机")")
         let carLifeAddress = (carLifeAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.carLifeAddress = !config.carLifeEnabled || carLifeAddress.isEmpty ? nil : carLifeAddress
     }
@@ -2455,9 +2456,14 @@ extension ReceiverViewController {
             }
             let granted = AVAudioSession.sharedInstance().recordPermission == .granted
             var sections = [SettingsSection(footer: "更改在下次启动 CarPlay 时生效。", rows)]
-            sections.append(SettingsSection("权限", [
-                .info("麦克风权限", granted ? "已允许" : "未允许（请在 iPhone 设置 › YCarWith 中打开「麦克风」）")
-            ]))
+            var permissionRows: [SettingsRow] = [
+                .info("麦克风权限", granted ? "已允许" : "未允许（通话和微信语音会双向无声，必须打开）")
+            ]
+            permissionRows.append(.action("打开系统设置（麦克风权限）", icon: ("gear", .systemGray)) { [unowned self] in
+                if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                self.reloadVisibleSettings()
+            })
+            sections.append(SettingsSection("权限", permissionRows))
             return sections
         }
     }

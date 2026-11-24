@@ -31,6 +31,7 @@ final class CarLifeOutput {
     private var warnedCodec = false
     private var discoverySocket: Int32 = -1
     private var discoveryErrorLogged = false
+    private var audioReceived = 0
     private var timer: DispatchSourceTimer?
 
     var onLog: ((String) -> Void)?
@@ -73,8 +74,16 @@ final class CarLifeOutput {
     }
 
     /// 把 CarPlay 解码出来的 PCM 交给车机端的伴音通道（CarLife 音乐模块，通道 3）。
+    /// 第一包一定打一条日志，用来区分“音频根本没进来”和“进来了但通道没建”。
     func appendAudio(_ buffer: AVAudioPCMBuffer) {
-        queue.async { [weak self] in self?.session?.audio(buffer) }
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.audioReceived += 1
+            if self.audioReceived == 1 {
+                self.log("CarLife 伴音：收到第一路音频 \(Int(buffer.format.sampleRate.rounded())) Hz / \(buffer.format.channelCount) 声道")
+            }
+            self.session?.audio(buffer)
+        }
     }
 
     func stop() { queue.async { [weak self] in self?.stopOnQueue() } }
@@ -762,6 +771,8 @@ private final class Session {
     }
     private var audioRate = 0, audioChannels = 0
     private var audioInitAt = DispatchTime(uptimeNanoseconds: 0)
+    private var audioInitLink: ObjectIdentifier?
+    private var lastAudioReport = DispatchTime(uptimeNanoseconds: 0)
     private var audioFramesSent = 0
     private var audioPlayed = false
     private var loggedNoAudioChannel = false
@@ -785,7 +796,10 @@ private final class Session {
             }
             return
         }
-        if audioRate != rate || audioChannels != channelsInBuffer {
+        let linkID = ObjectIdentifier(link)
+        // 通道 3 可能比音频晚到（车机自己决定什么时候连），换了 socket 就得重发一次初始化，
+        // 否则车机那边根本没建 AudioTrack，数据进来也只能丢。
+        if audioRate != rate || audioChannels != channelsInBuffer || audioInitLink != linkID {
             audioRate = rate; audioChannels = channelsInBuffer; audioFramesSent = 0
             let config = channelsInBuffer == 1 ? 4 : 12   // CHANNEL_OUT_MONO / STEREO
             let initData = CarLifeProtoWriter().number(1, Int64(rate)).number(2, Int64(config)).number(3, 2).data
@@ -793,7 +807,8 @@ private final class Session {
             audioInitAt = .now()
             send(3, MusicCommand.play)
             audioPlayed = true
-            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 PCM16")
+            audioInitLink = linkID
+            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 PCM16（通道 3 已就绪）")
         }
         // 太久没声（切歌/暂停后恢复）时补一次播放命令，免得车机还停在暂停态。
         let now = DispatchTime.now().uptimeNanoseconds
@@ -836,6 +851,12 @@ private final class Session {
             // 车机常常是“先请求画面、后开视频通道”，第一次回放会落在通道还没建的空档上。
             if framesSent == 0, waitingForKeyframe { onStartFrameNeeded?() }
             requestKeyframe(nil)
+        }
+        // 每 5 秒报一次伴音实况：这行能一眼看出是“没送出去”还是“送了车机不播”。
+        if audioRate > 0, now - lastAudioReport.uptimeNanoseconds >= 5_000_000_000 {
+            lastAudioReport = .now()
+            let seconds = audioRate > 0 ? audioFramesSent / audioRate : 0
+            log?("CarLife 伴音：已送 \(seconds) 秒音频，通道3\(audioLink == nil ? "未建立" : "已建立")，待写 \(audioLink?.pendingBytes ?? 0) 字节")
         }
     }
 

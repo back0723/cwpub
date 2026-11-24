@@ -131,7 +131,9 @@ final class CarPlayAudio {
                 let needsDuplexCategory = microphone != nil || Self.hasSpeakerOverride
                 var options: AVAudioSession.CategoryOptions = needsDuplexCategory ? [.defaultToSpeaker] : []
                 if Self.preferBluetoothOutput { options.insert(.allowBluetoothA2DP) }
-                if BackgroundKeepAlive.holdsAudioSession { options.insert(.mixWithOthers) }
+                // 要录音时绝不能带 .mixWithOthers：后台里“可混音的录音”会被系统直接拒绝
+                // （AVAudioSession.ErrorCode.cannotStartRecording / 561145187）。
+                if BackgroundKeepAlive.holdsAudioSession, microphone == nil { options.insert(.mixWithOthers) }
                 let category: AVAudioSession.Category = needsDuplexCategory ? .playAndRecord : .playback
                 if session.category != category || session.mode != .default || session.categoryOptions != options {
                     try session.setCategory(category, mode: .default, options: options)
@@ -397,6 +399,16 @@ private final class NativeMicrophone {
     }
     private func beginCapture() {
         do {
+            // 后台播音时系统常把会话留在 .playback（或带 .mixWithOthers），此时开录音必然
+            // 报 cannotStartRecording（561145187）。录音前把会话摆回可录状态，并明确用内建麦克风。
+            let session = AVAudioSession.sharedInstance()
+            if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
+                try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
+            }
+            try session.setActive(true)
+            if let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                try? session.setPreferredInput(builtIn)
+            }
             if format.isOpus { opusEncoder = try NativeOpusEncoder(rate: rate) }
             let input = engine.inputNode.outputFormat(forBus: 0)
             guard input.sampleRate > 0, input.channelCount > 0,
@@ -424,8 +436,25 @@ private final class NativeMicrophone {
             }
             installedTap = true
             try engine.start()
-            onLog?("\(format.name) 麦克风已启动：\(rate) Hz 单声道")
-        } catch { onLog?("无法启动麦克风：\(error.localizedDescription)"); stop() }
+            onLog?("\(format.name) 麦克风已启动：\(rate) Hz 单声道（权限 \(Self.permissionText())）")
+        } catch {
+            if !loggedFailure {
+                loggedFailure = true
+                let session = AVAudioSession.sharedInstance()
+                let inputs = session.availableInputs?.map { $0.portType.rawValue }.joined(separator: ",") ?? "无"
+                onLog?("无法启动麦克风：\(error.localizedDescription)（类别 \(session.category.rawValue)，输入 \(inputs)，权限 \(Self.permissionText())）")
+            }
+            stop()
+        }
+    }
+    private var loggedFailure = false
+    static func permissionText() -> String {
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return "已允许"
+        case .denied: return "已拒绝（去 设置 > YCarWith 打开麦克风）"
+        case .undetermined: return "未询问"
+        @unknown default: return "未知"
+        }
     }
     private func send(_ input: AVAudioPCMBuffer) {
         guard let converter else { return }

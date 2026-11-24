@@ -38,6 +38,8 @@ final class NativeReceiver {
     // forceKeyFrame state: throttled sends, resent every second until a keyframe arrives.
     private var keyframeWantedSince: DispatchTime?
     private var keyframeLastSent: DispatchTime?
+    /// 只报一次“伴音开关没开”，免得每个音频包都刷日志。
+    private var loggedCarLifeAudioBlocked = false
     private var keyframeAttempts = 0
     private var keyframeReason = ""
     private var touchSlots = TouchSlots(count: CarPlayInfo.touchContacts)
@@ -578,7 +580,14 @@ final class NativeReceiver {
                 }
                 // CarLife 车机端的伴音：把每一路解码后的 PCM 直接喂给车机的音频模块。
                 media.onAudioPCM = { [weak self] _, buffer in
-                    guard let self, configuration.carLifeEnabled, configuration.carLifeAudio else { return }
+                    guard let self else { return }
+                    guard self.configuration.carLifeEnabled, self.configuration.carLifeAudio else {
+                        if !self.loggedCarLifeAudioBlocked {
+                            self.loggedCarLifeAudioBlocked = true
+                            self.log("CarLife 伴音：音频没送去车机（CarLife 模式=\(self.configuration.carLifeEnabled ? "开" : "关")，「随画面传输」=\(self.configuration.carLifeAudio ? "开" : "关")）")
+                        }
+                        return
+                    }
                     self.carLife.appendAudio(buffer)
                 }
                 media.browserAudioWanted = { [weak self] in self?.videoOutput.hasAudioViewers ?? false }
