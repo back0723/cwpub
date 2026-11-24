@@ -2212,6 +2212,7 @@ extension ReceiverViewController {
                         case .carWithin: return "接收设备播放"
                         case .phone: return "iPhone 输出"
                         case .browser: return "Wi-Fi 伴音"
+                        case .bluetooth: return "车机蓝牙"
                         }
                     }) { [unowned self] in self.soundPage() },
                     .control("驾驶位", icon: ("steeringwheel", .systemTeal), driveControl),
