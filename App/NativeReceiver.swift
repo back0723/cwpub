@@ -40,6 +40,8 @@ final class NativeReceiver {
     private var keyframeLastSent: DispatchTime?
     /// 只报一次“伴音开关没开”，免得每个音频包都刷日志。
     private var loggedCarLifeAudioBlocked = false
+    /// 通话流停止后延迟恢复车机音乐的计时任务。
+    private var voiceReleaseWork: DispatchWorkItem?
     private var keyframeAttempts = 0
     private var keyframeReason = ""
     private var touchSlots = TouchSlots(count: CarPlayInfo.touchContacts)
@@ -489,6 +491,7 @@ final class NativeReceiver {
     }
     private func stopOnQueue(keepingBrowser: Bool = false) {
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
+        voiceReleaseWork?.cancel(); voiceReleaseWork = nil; carLife.setCallActive(false)
         generation = UUID(); listener?.cancel(); listener = nil
         if !keepingBrowser { videoOutput.stop(); browserRunning = false }
         carLife.stop()
@@ -578,11 +581,23 @@ final class NativeReceiver {
                 media.onBrowserAudio = { [weak self] stream, buffer, stamp in
                     self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
                 }
-                // CarLife 车机端的伴音：把每一路解码后的 PCM 直接喂给车机的音频模块。
+                // CarLife 车机端的音频分流：迷行 4.1.3 有音乐(通道3)与导航TTS(通道4)两套独立系统。
+                // 以前不分类型全塞通道3，导致导航被当音乐、格式交替重建 AudioTrack（冲突/卡顿/丢声）；
+                // 通话流塞通道3 则会在通话时混进车机音乐。现在按 CarPlay audioType 分到对应通道，
+                // 通话流根本不送车机，交给 iPhone 本机蓝牙/听筒。
                 let carLifeOn = configuration.carLifeEnabled
                 let carLifeAudioOn = configuration.carLifeAudio
-                media.onAudioPCM = { [weak self] _, buffer in
+                media.onAudioPCM = { [weak self] frame in
                     guard let self else { return }
+                    if frame.route == .voice {
+                        // 电话/微信语音：不送车机，且暂停车机音乐/导航，通话停止后自动恢复。
+                        self.carLife.setCallActive(true)
+                        self.voiceReleaseWork?.cancel()
+                        let work = DispatchWorkItem { [weak self] in self?.carLife.setCallActive(false) }
+                        self.voiceReleaseWork = work
+                        self.queue.asyncAfter(deadline: .now() + 1.2, execute: work)
+                        return
+                    }
                     guard carLifeOn, carLifeAudioOn else {
                         if !self.loggedCarLifeAudioBlocked {
                             self.loggedCarLifeAudioBlocked = true
@@ -590,7 +605,12 @@ final class NativeReceiver {
                         }
                         return
                     }
-                    self.carLife.appendAudio(buffer)
+                    switch frame.route {
+                    case .navigation:
+                        self.carLife.appendNavigationAudio(frame.buffer)
+                    case .music, .voice:
+                        self.carLife.appendAudio(frame.buffer)
+                    }
                 }
                 // 【声音重复/音质差/停播后仍响 根因】音频送到车机有两条路：
                 //   路径A：onPCM → CarLife 通道3 → 迷行APK 的 AudioTrack（我们要的）；
