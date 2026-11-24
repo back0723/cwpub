@@ -32,6 +32,7 @@ final class CarLifeOutput {
     private var discoverySocket: Int32 = -1
     private var discoveryErrorLogged = false
     private var audioReceived = 0
+    private var navAudioReceived = 0
     private var timer: DispatchSourceTimer?
 
     var onLog: ((String) -> Void)?
@@ -83,6 +84,24 @@ final class CarLifeOutput {
                 self.log("CarLife 伴音：收到第一路音频 \(Int(buffer.format.sampleRate.rounded())) Hz / \(buffer.format.channelCount) 声道")
             }
             self.session?.audio(buffer)
+        }
+    }
+
+    /// 有电话/微信语音时通知车机暂音乐道 3 与导航通道 4，通话结束后自动恢复，
+    /// 避免通话期间车机还在播音乐/导航 ——「打电话时不要有其它音频」。
+    func setCallActive(_ active: Bool) {
+        queue.async { [weak self] in self?.session?.setCallActive(active) }
+    }
+
+    /// 导航播报走车机独立的 TTS 通道 4（命令 0x40001/0x40003），不再混进音乐通道 3。
+    func appendNavigationAudio(_ buffer: AVAudioPCMBuffer) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if self.navAudioReceived == 0 {
+                self.log("CarLife 导航：收到导航播报音频 \(Int(buffer.format.sampleRate.rounded())) Hz / \(buffer.format.channelCount) 声道")
+            }
+            self.navAudioReceived += 1
+            self.session?.navigationAudio(buffer)
         }
     }
 
@@ -781,6 +800,13 @@ private final class Session {
         static let noop = 196_613         // 0x30005
         static let data = 196_614         // 0x30006
     }
+    /// 导航 TTS 模块 La/a/b/p/b; 的命令（smali 反编译确认）：0x40001 init / 0x40002 stop / 0x40003 data。
+    /// 它和音乐模块各有独立 AudioTrack + AudioFocus，所以导航播报不会再和音乐抢同一个播放器。
+    private enum TTSCommand {
+        static let initialize = 262_145   // 0x40001
+        static let stop = 262_146         // 0x40002
+        static let data = 262_147         // 0x40003
+    }
     private var audioRate = 0, audioChannels = 0
     private var audioInitAt = DispatchTime(uptimeNanoseconds: 0)
     private var audioInitLink: ObjectIdentifier?
@@ -798,13 +824,30 @@ private final class Session {
     private var silentSince: DispatchTime?
     private var pausedBySilence = false
 
+    /// 导航 TTS（通道 4）独立播放器状态，与音乐互不干扰。
+    private var ttsRate = 0, ttsChannels = 0
+    private var ttsInitLink: ObjectIdentifier?
+    private var ttsFramesSent = 0
+    private var ttsPlayed = false
+    private var ttsSilentSince: DispatchTime?
+    private var ttsPausedBySilence = false
+    private var lastTTSAudioAt = DispatchTime(uptimeNanoseconds: 0)
+    private var loggedNoTTSChannel = false
+    /// 通话/微信语音期间：暂停车机音乐与导航，避免混入其它音频。
+    private var callActive = false
+    private var musicPausedByCall = false
+    private var ttsPausedByCall = false
+
     private var audioLink: Link? {
         // 车机只在通道 3 上认音乐消息；通道没建时不要往别的通道乱发。
         channels[3]
     }
+    private var ttsLink: Link? { channels[4] }
 
     func audio(_ buffer: AVAudioPCMBuffer) {
         guard active, authenticated else { return }
+        // 通话期间音乐一律不送车机，避免混入通话。
+        guard !callActive else { return }
         let frames = Int(buffer.frameLength)
         let channelsInBuffer = Int(buffer.format.channelCount)
         let rate = Int(buffer.format.sampleRate.rounded())
@@ -878,6 +921,99 @@ private final class Session {
         audioFramesSent += frames
     }
 
+    /// 通话/微信语音占用时，暂停车机音乐(通道3)与导航(通道4)，结束后恢复。
+    func setCallActive(_ active: Bool) {
+        guard active != callActive else { return }
+        callActive = active
+        if active {
+            if !pausedBySilence, audioLink != nil {
+                send(3, MusicCommand.pause); musicPausedByCall = true
+            }
+            if !ttsPausedBySilence, ttsLink != nil {
+                send(4, TTSCommand.stop); ttsPausedByCall = true
+            }
+            log?("CarLife：通话占用，已暂停车机音乐/导航，避免混入通话")
+        } else {
+            // 通话结束：若之前确实因通话暂停过，恢复播放/重建导航。
+            if musicPausedByCall {
+                musicPausedByCall = false
+                if !pausedBySilence, audioLink != nil {
+                    send(3, MusicCommand.play); audioPlayed = true; lastPlayAt = .now()
+                }
+            }
+            if ttsPausedByCall {
+                ttsPausedByCall = false
+                if !ttsPausedBySilence, ttsLink != nil {
+                    // 导航下次有数据会重新 init+播报，这里只需清状态。
+                    ttsPlayed = false; ttsInitLink = nil
+                }
+            }
+            log?("CarLife：通话结束，已恢复车机音乐/导航")
+        }
+    }
+
+    // MARK: Audio - 导航播报（TTS，通道 4）
+    /// 车机导航 TTS 模块 `La/a/b/p/b;` 在通道 4 上：
+    /// · 0x40001 带 CarlifeTTSInit{sampleRate, channelConfig, sampleFormat} 建独立 AudioTrack；
+    /// · 0x40002 stop；0x40003 携带裸 PCM16。
+    /// 字段号与音乐 init 完全一致（1=rate, 2=channels, 3=bitDepth）。
+    func navigationAudio(_ buffer: AVAudioPCMBuffer) {
+        guard active, authenticated else { return }
+        guard !callActive else { return }  // 通话期间导航也不送车机
+        let frames = Int(buffer.frameLength)
+        let channelsInBuffer = Int(buffer.format.channelCount)
+        let rate = Int(buffer.format.sampleRate.rounded())
+        guard frames > 0, channelsInBuffer > 0, rate >= 8000 else { return }
+        guard let pcm = Self.pcm16(buffer) else { return }
+        let peak = Self.peakPCM16(pcm)
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+
+        // 导航播报同样做静音检测：播报结束后停，避免残留缓冲一直占着 TTS AudioTrack。
+        if peak < 64 {
+            if ttsSilentSince == nil { ttsSilentSince = DispatchTime(uptimeNanoseconds: nowNs) }
+            if !ttsPausedBySilence, let since = ttsSilentSince, nowNs >= since.uptimeNanoseconds,
+               nowNs - since.uptimeNanoseconds > 800_000_000 {
+                send(4, TTSCommand.stop)
+                ttsPausedBySilence = true
+                ttsPlayed = false
+                log?("CarLife 导航：播报结束（静音），已停止车机导航通道")
+            }
+            return
+        }
+        if ttsPausedBySilence {
+            ttsPausedBySilence = false
+            ttsSilentSince = nil
+        } else {
+            ttsSilentSince = nil
+        }
+        guard let link = ttsLink else {
+            if !loggedNoTTSChannel {
+                loggedNoTTSChannel = true
+                log?("CarLife：导航音频通道（通道 4 / 端口 9241）没建立，导航播报暂时送不上车机")
+            }
+            return
+        }
+        let linkID = ObjectIdentifier(link)
+        if ttsRate != rate || ttsChannels != channelsInBuffer || ttsInitLink != linkID {
+            ttsRate = rate; ttsChannels = channelsInBuffer; ttsFramesSent = 0
+            let initData = CarLifeProtoWriter().number(1, Int64(rate)).number(2, Int64(channelsInBuffer)).number(3, 16).data
+            send(4, TTSCommand.initialize, initData)
+            ttsInitLink = linkID
+            log?("CarLife 导航：初始化 \(rate) Hz / \(channelsInBuffer) 声道 / 16 位 PCM16（通道 4 已就绪）")
+        }
+        let now = nowNs
+        let lastAt = lastTTSAudioAt.uptimeNanoseconds
+        if !ttsPlayed || (now >= lastAt && now - lastAt > 2_000_000_000) {
+            // TTS init 自带 play，不需要额外的 play 命令（命令表只有 init/stop/data）。
+            ttsPlayed = true
+        }
+        lastTTSAudioAt = DispatchTime(uptimeNanoseconds: now)
+        guard link.pendingBytes < 512 * 1024 else { return }
+        guard send(4, TTSCommand.data, pcm) else { return }
+        if ttsFramesSent == 0 { log?("CarLife 导航：已开始向车机送导航播报（\(pcm.count) 字节/包）") }
+        ttsFramesSent += frames
+    }
+
     /// Float32（AVAudioEngine 的标准格式）→ 交错 PCM16 小端。
     static func pcm16(_ buffer: AVAudioPCMBuffer) -> Data? {
         guard let planes = buffer.floatChannelData else { return nil }
@@ -933,7 +1069,7 @@ private final class Session {
         }
         // 有些车机把最早的 play 吞掉后一直停在“已初始化未播放”，定期补一次（不会打断正在播的）。
         // 但如果正处于静音暂停态，绝不能补 play——那会把车机从 pause 唤醒、重播残留缓冲。
-        if audioRate > 0, !pausedBySilence, audioLink != nil, now - lastPlayAt.uptimeNanoseconds >= 5_000_000_000 {
+        if audioRate > 0, !pausedBySilence, !callActive, audioLink != nil, now - lastPlayAt.uptimeNanoseconds >= 5_000_000_000 {
             lastPlayAt = .now()
             send(3, MusicCommand.play)
         }
