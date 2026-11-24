@@ -816,8 +816,13 @@ private final class Session {
         let peak = Self.peakPCM16(pcm)
         let nowNs = DispatchTime.now().uptimeNanoseconds
         if peak < 64 {
-            if silentSince == nil { silentSince = .now() }
-            if !pausedBySilence, let since = silentSince, nowNs - since.uptimeNanoseconds > 1_200_000_000 {
+            // 【闪退修复】silentSince 必须在这里就用当前时刻落定，不能晚于 nowNs：
+            // 之前先算 nowNs 再 silentSince = .now()，两者先后两个采样点，若 since > nowNs，
+            // UInt64 减法下溢 → Swift 直接 trap（车机一连上推静音帧就闪）。
+            // 统一用 nowNs 落定，并用 >= 钳制后再相减，杜绝任何负差。
+            if silentSince == nil { silentSince = DispatchTime(uptimeNanoseconds: nowNs) }
+            if !pausedBySilence, let since = silentSince, nowNs >= since.uptimeNanoseconds,
+               nowNs - since.uptimeNanoseconds > 1_200_000_000 {
                 send(3, MusicCommand.pause)
                 pausedBySilence = true
                 audioPlayed = false
