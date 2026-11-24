@@ -60,7 +60,8 @@ struct ReceiverConfiguration {
         Resolution(label: "2K", width: 2560, height: 1440),
         Resolution(label: "4K", width: 3840, height: 2160)
     ]
-    static let defaultResolutionIndex = 1
+    /// 车载出厂预设：默认 1080P（resolutions[2]）。
+    static let defaultResolutionIndex = 2
 
     struct AspectRatio {
         let width: Int
