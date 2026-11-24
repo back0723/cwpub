@@ -255,7 +255,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private static let releasesURL = projectURL.appendingPathComponent("releases")
     private static let supportURL = URL(string: "https://qr.alipay.com/fkx16608y1puemmltuocze0")!
     private static let authorURL = URL(string: "https://v.douyin.com/x64M2NbYj0A/")!
-    private var lines: [String] = []
+    /// 日志改由 PersistentLog 落盘保存：闪退/退出后仍在，500 条轮转，含崩溃堆栈。
+    private var lines: [String] { PersistentLog.shared.lines }
     private var launchedTransportTest = false
 
     override func viewDidAppear(_ animated: Bool) {
@@ -297,6 +298,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        applyCarLifeFactoryPresetIfNeeded()
         title = "YCarWith"
         CarPlayAudio.preferBluetoothOutput = selectedSoundOutput == .bluetooth
         CarPlayAudio.capturesMicrophone = usesPhoneMicrophone
@@ -323,6 +325,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         ssidField.addTarget(self, action: #selector(loadWiFiPassword), for: .editingDidEnd)
         channelField.text = String(Int(selectedPreset?.channel ?? UInt8(UserDefaults.standard.object(forKey: "wifiChannel") as? Int ?? 36)))
         openNetworkSwitch.isOn = selectedPreset?.isOpen ?? false
+        // 出厂预置的 WiFi 密码存在钥匙串里、启动时不会自动进输入框；这里主动读一次，
+        // 保证"装好即用"，否则首次启动会因密码框为空而提示重新输入。
+        if !(ssidField.text ?? "").isEmpty, (passwordField.text ?? "").isEmpty {
+            passwordLoadedForSSID = ssidField.text
+            if let saved = try? WiFiCredentials.password(for: ssidField.text ?? "") {
+                passwordField.text = saved
+                openNetworkSwitch.isOn = saved.isEmpty
+            }
+        }
         channelField.keyboardType = .numberPad
         channelField.placeholder = "默认 36，一般无需修改"
         bluetoothSetupSwitch.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
@@ -1913,9 +1924,14 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
     }
     @objc private func copyLog() { UIPasteboard.general.string = lines.joined(separator: "\n") }
+    @objc private func clearLog() {
+        PersistentLog.shared.clear()
+        logView.text = ""
+        log("日志已清空")
+    }
     private func log(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        lines.append("\(timestamp)  \(message)"); if lines.count > 500 { lines.removeFirst(lines.count - 500) }
+        PersistentLog.shared.append("\(timestamp)  \(message)")
         if logView.window != nil {
             logView.text = lines.joined(separator: "\n")
             if !logView.text.isEmpty { logView.scrollRangeToVisible(NSRange(location: logView.text.utf16.count - 1, length: 1)) }
@@ -1927,6 +1943,36 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
 // MARK: - Settings pages
 
 extension ReceiverViewController {
+    /// 车载出厂预设（一次性迁移）：装好即用，无需手动逐项设置。
+    ///   · WiFi 预设 wrt / littleboy123（channel 36）
+    ///   · 当前输出默认 CarLife
+    ///   · 声音默认车机（随画面传输 + carLifeAudio 开）
+    ///   · 画面分辨率默认 1080P
+    /// 只在首次（或升级后首次）套用一次，之后完全尊重用户手动修改；用独立 key 保证只跑一次。
+    fileprivate func applyCarLifeFactoryPresetIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "didApplyCarLifeFactoryPresetV1") else { return }
+
+        // 1) WiFi 预设 wrt / littleboy123
+        WiFiPresetStore.upsert(ssid: "wrt", channel: 36, isOpen: false)
+        defaults.set("wrt", forKey: "wifiSSID")
+        defaults.set(36, forKey: "wifiChannel")
+        try? WiFiCredentials.save("littleboy123", for: "wrt")
+
+        // 2) 输出默认 CarLife（headUnitOutputV2，CarLife.rawValue = 1）
+        defaults.set(HeadUnitOutput.carLife.rawValue, forKey: "headUnitOutputV2")
+        defaults.set(true, forKey: "carLifeEnabled")
+
+        // 3) 声音默认车机：CarLife 模式下出声完全靠 carLifeAudio 开关（onAudioPCM→通道3→车机喇叭），
+        //    soundOutput 枚举在 CarLife 下恒为 .phone、不起作用，所以只需保证这个开关为开。
+        defaults.set(true, forKey: "carLifeAudio")
+
+        // 4) 分辨率默认 1080P（resolutions 索引 2）
+        defaults.set(2, forKey: "displayResolutionIndex")
+
+        defaults.set(true, forKey: "didApplyCarLifeFactoryPresetV1")
+    }
+
     /// Initial values and change handlers for every setting control. The controls live on the
     /// settings pages; the rest of this controller reads them directly.
     fileprivate func configureSettingsControls() {
@@ -2896,9 +2942,11 @@ extension ReceiverViewController {
     fileprivate func logPage() -> SettingsPageController {
         let controller = page("日志") { [unowned self] in
             [
-                SettingsSection(footer: "最近 500 条轮转，不含 Wi-Fi 密码和 MFi 私钥。", [.view(logView)]),
+                SettingsSection(footer: "日志已保存到本地文件，最近 500 条轮转，闪退后重启仍在；含崩溃堆栈，不含 Wi-Fi 密码和 MFi 私钥。", [.view(logView)]),
                 SettingsSection([.action("复制日志", icon: ("doc.on.doc.fill", .systemBlue)) { [unowned self] in
                     self.copyLog(); self.alert("已复制", "日志已复制到剪贴板。")
+                }, .action("清空日志", icon: ("trash.fill", .systemRed)) { [unowned self] in
+                    self.clearLog(); self.alert("已清空", "本地日志已删除。")
                 }])
             ]
         }
