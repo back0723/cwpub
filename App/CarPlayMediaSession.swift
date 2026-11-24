@@ -19,13 +19,18 @@ enum CarLifeAudioRoute: String {
     /// alert/navigation 是导航播报；其余(default/101) 保守当音乐，保证一定有声音。
     static func classify(streamType: Int, audioType: String) -> CarLifeAudioRoute {
         let kind = audioType.lowercased()
+        // 电话 / 语音识别 → 交给 iPhone 本机（微信/电话的蓝牙或听筒），绝不送车机。
         if ["telephony", "speechrecognition"].contains(kind) { return .voice }
-        if streamType == 100 && kind.isEmpty == false && kind != "media" && kind != "default" {
-            // stream 100 上的非媒体类型（alert 等）按导航/提示音处理
-            return .navigation
-        }
-        if ["alert", "navigation", "navi", "tts"].contains(kind) { return .navigation }
-        if streamType == 102 { return .music }
+        if streamType == 100 { return .voice }
+        // 导航播报 / 系统提示 / 语音助手 → 车机独立 TTS 通道 4。
+        // 【音乐+导航双双无声根因】CarPlay 的 stream 101（Opus 48000Hz 单声道，audioType=default）
+        // 就是导航/Siri 语音。旧逻辑把它当音乐塞进通道 3，和音乐 stream 102（AAC 44100Hz 双声道）
+        // 交替触发 audio() 里的 init —— 每秒十几次重建同一个 AudioTrack，最终彻底卡死无声。
+        // 按 CarPlay 规范：100=电话、101=语音/导航、102=媒体音乐，物理分开到车机两个播放器。
+        if ["alert", "navigation", "navi", "tts", "speech", "assistant", "default"].contains(kind) { return .navigation }
+        if streamType == 101 { return .navigation }
+        // 媒体音乐 → 通道 3。
+        if streamType == 102 || kind == "media" { return .music }
         return .music
     }
 }
@@ -102,13 +107,13 @@ final class CarPlayMediaSession {
                     let output = try CarPlayAudio(secret: secret, peerAddress: peerAddress,
                         connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort, isVoice: isVoice)
                     output.onLog = { [weak self] in self?.onLog?($0) }
-                    if isVoice {
-                        // 通话声音必须留在 iPhone 本机（微信/电话的蓝牙或听筒路由），
-                        // 绝不能被 CarLife 伴音的"恒转发"逻辑送走，否则对方声音在本机彻底消失。
-                        output.shouldForwardAudio = { false }
-                    } else {
-                        output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
-                    }
+                    // 所有流（含通话）统一遵循 browserAudioWanted：
+                    // · CarLife 模式恒 true → 走 onBrowserAudio 转发后直接 return，不落本机
+                    //   AVAudioEngine 播放分支。那个分支在 CarAudio 路由下会 setCategory(.playAndRecord)
+                    //   + overrideOutputAudioPort(.speaker)，正是顶断微信、双方听不到的元凶。
+                    // · 通话对方声音已由 onAudioPCM → 车机通道3 播出（音乐/导航此刻暂停独占）。
+                    // · 麦克风启动在 receive() 里独立于播放分支，不受此开关影响。
+                    output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
                     // 导航/通话只交给车机对应通道，本机 AVAudioEngine 不再重复播放，避免车机与手机双份声音。
                     output.onPCM = { [weak self] buffer in
                         let frame = CarLifeAudioFrame(buffer: buffer, streamType: streamType, audioType: audioType, route: route)
