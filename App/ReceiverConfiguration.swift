@@ -127,6 +127,13 @@ struct ReceiverConfiguration {
         return result
     }
 
+    /// 能与 CarPlay 接上的本机地址。个人热点模式下 iPhone 的 Wi-Fi 射频处于 AP 模式，
+    /// 它自己连 172.20.10.1 是连不通的（日志里就是一直「会话正在等待 TCP 连接」），
+    /// 只能用本机回环地址，CarPlay 会话本来就在这台手机上。
+    var carPlayTargetAddress: String {
+        ReceiverConfiguration.hotspotIPv4Address() == address ? "127.0.0.1" : address
+    }
+
     static func persistentDeviceID() -> String {
         if let existing = UserDefaults.standard.string(forKey: "receiverDeviceID") { return existing }
         var random = [UInt8](repeating: 0, count: 6)
