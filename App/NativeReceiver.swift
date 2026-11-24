@@ -592,7 +592,22 @@ final class NativeReceiver {
                     }
                     self.carLife.appendAudio(buffer)
                 }
-                media.browserAudioWanted = { [weak self] in self?.videoOutput.hasAudioViewers ?? false }
+                // 【声音重复/音质差/停播后仍响 根因】音频送到车机有两条路：
+                //   路径A：onPCM → CarLife 通道3 → 迷行APK 的 AudioTrack（我们要的）；
+                //   路径B：CarPlayAudio 本机 AVAudioEngine 播放，路由是 CarAudio —— CarPlay 会话下
+                //          系统把 iPhone 本机音频又送回车机，于是同一份音乐播两遍：重复、相位叠加
+                //          导致音质差，本机还积压 1393ms 队列，停播后继续往外灌。
+                // 路径B 是否启用由 shouldForwardAudio（=browserAudioWanted）决定：返回 true 时
+                // CarPlayAudio 把 PCM 送网页后直接 return，不落本机播放。CarLife 音频已由路径A
+                // 送到车机，所以这里在 CarLife 伴音开启时必须恒返回 true，把路径B 彻底关掉。
+                if carLifeOn && carLifeAudioOn {
+                    self.log("CarLife 伴音已接管：关闭 iPhone 本机播放，避免声音经 CarAudio 重复送回车机")
+                }
+                media.browserAudioWanted = { [weak self] in
+                    guard let self else { return true }
+                    if carLifeOn && carLifeAudioOn { return true }
+                    return self.videoOutput.hasAudioViewers ?? false
+                }
                 if let nightMode { media.setNightMode(nightMode) }
                 media.onVideo = { [weak self] data, codec in
                     guard let self else { return }
