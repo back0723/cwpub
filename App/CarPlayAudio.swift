@@ -96,8 +96,12 @@ final class CarPlayAudio {
     static var preferBluetoothOutput = false
     /// 麦克风输入设置：true 用 iPhone 麦克风，false 不占用手机麦克风（交给车机/系统）。
     static var capturesMicrophone = true
-    init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil) throws {
-        self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format
+    /// true = 通话/语音流（stream 100 telephony / speechrecognition）。这类流在本机绝不碰
+    /// AVAudioSession 路由：微信已经持有通话会话，任何 setCategory/setActive/overrideOutputAudioPort
+    /// 都会把微信顶断（真机日志：改路由后立刻「操作已中断」→ 微信挂断）。声音只送 CarLife 通道3/网页。
+    private let isVoice: Bool
+    init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil, isVoice: Bool = false) throws {
+        self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format; self.isVoice = isVoice
         decoder = try NativeAudioDecoder(format: format)
         output = decoder.output
         cipher = AudioStream(secret: secret, connectionID: connectionID)
@@ -145,7 +149,12 @@ final class CarPlayAudio {
                 // 只用 .mixWithOthers 把解码出的对方声音温和地混入当前路由（微信正在用的那个输出）。
                 // 对方声音同时早已在 onPCM 里送到 CarLife 通道 3、在 onBrowserAudio 里送到网页。
                 let needsDuplexCategory = microphone != nil || Self.hasSpeakerOverride
-                let inCall = session.isOtherAudioPlaying
+                // 关键修复：用 isVoice（来自 CarPlay 的 audioType）作为首要判据，而不是
+                // isOtherAudioPlaying。通话刚建立时 isOtherAudioPlaying 可能还是 false，
+                // 旧代码据此走进 else 分支执行 setCategory(.playAndRecord)+overrideOutputAudioPort(.speaker)，
+                // 把微信的通话路由抢走 → AVAudioSession 中断 → 微信挂断（真机日志铁证）。
+                // 通话流一律走「只混音、不碰路由」分支。
+                let inCall = isVoice || session.isOtherAudioPlaying
                 var options: AVAudioSession.CategoryOptions = needsDuplexCategory ? [.defaultToSpeaker] : []
                 if Self.preferBluetoothOutput { options.insert(.allowBluetoothA2DP) }
                 if inCall {
@@ -476,6 +485,11 @@ private final class NativeMicrophone {
     private var loggedWaitingForAudio = false
     private var pending = Data()
     private var failures = 0
+    // 上行诊断：统计实际送出的包数/字节、输入峰值电平，便于区分“没采到声音”和“采到没送出”。
+    private var sentPackets = 0
+    private var sentBytes = 0
+    private var peakLevel: Float = 0
+    private var lastUplinkReport: DispatchTime = .now()
     var onLog: ((String) -> Void)?
     init(secret: SymmetricKey, connectionID: UInt64, address: String, port: UInt16, format: ReceiverAudioFormat) {
         self.rate = format.sampleRate; self.format = format
@@ -587,7 +601,9 @@ private final class NativeMicrophone {
             if status == .error { throw error ?? NSError(domain: "TDSMicrophone", code: 1) }
             guard let samples = output.floatChannelData?[0] else { return }
             for index in 0..<Int(output.frameLength) {
-                let scaled = samples[index].isFinite ? max(-32768, min(32767, samples[index] * 32768)) : 0
+                let v = samples[index]
+                if v.isFinite { peakLevel = max(peakLevel, abs(v)) }
+                let scaled = v.isFinite ? max(-32768, min(32767, v * 32768)) : 0
                 let sample = UInt16(bitPattern: Int16(scaled))
                 pending.append(UInt8(truncatingIfNeeded: sample >> 8)); pending.append(UInt8(truncatingIfNeeded: sample))
             }
@@ -601,9 +617,17 @@ private final class NativeMicrophone {
                     payload = encoded
                 } else { payload = pcm }
                 let wire = try packetizer.seal(payload, frames: UInt32(frames))
+                sentPackets += 1; sentBytes += wire.count
                 connection.send(content: wire, completion: .contentProcessed { [weak self] error in
                     if error != nil { self?.stop() }
                 })
+            }
+            // 每 5 秒报一次上行实况：peak=0 表示 iPhone 没采到你的声音；sentBytes=0 表示采到但没发出去。
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now - lastUplinkReport.uptimeNanoseconds >= 5_000_000_000 {
+                lastUplinkReport = .now()
+                onLog?("上行麦克风实况：已送 \(sentPackets) 包 / \(sentBytes) 字节，输入峰值 \(String(format: "%.4f", peakLevel))，输出路由 \(AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","))")
+                peakLevel = 0
             }
         } catch {
             failures += 1
