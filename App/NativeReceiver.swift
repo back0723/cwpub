@@ -576,6 +576,11 @@ final class NativeReceiver {
                 media.onBrowserAudio = { [weak self] stream, buffer, stamp in
                     self?.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
                 }
+                // CarLife 车机端的伴音：把每一路解码后的 PCM 直接喂给车机的音频模块。
+                media.onAudioPCM = { [weak self] _, buffer in
+                    guard let self, configuration.carLifeEnabled, configuration.carLifeAudio else { return }
+                    self.carLife.appendAudio(buffer)
+                }
                 media.browserAudioWanted = { [weak self] in self?.videoOutput.hasAudioViewers ?? false }
                 if let nightMode { media.setNightMode(nightMode) }
                 media.onVideo = { [weak self] data, codec in

@@ -82,10 +82,14 @@ final class CarPlayAudio {
     #endif
     var onLog: ((String) -> Void)?
     var onBrowserAudio: ((AVAudioPCMBuffer, UInt64) -> Void)?
+    /// 每个解码出来的 PCM 缓冲都会先走这里一次，用于把伴音送给 CarLife 车机端。
+    var onPCM: ((AVAudioPCMBuffer) -> Void)?
     /// 车机页面上是否真的有人在要声音。返回 false（或未设置）时音频在本机播放。
     var shouldForwardAudio: (() -> Bool)?
     /// 声音选项选了"车机蓝牙"：本机播放时优先把音频送到车机蓝牙（A2DP），而不是手机扬声器。
     static var preferBluetoothOutput = false
+    /// 麦克风输入设置：true 用 iPhone 麦克风，false 不占用手机麦克风（交给车机/系统）。
+    static var capturesMicrophone = true
     init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format
         decoder = try NativeAudioDecoder(format: format)
@@ -94,7 +98,7 @@ final class CarPlayAudio {
         data = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
         control = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
         dataPort = data.port; controlPort = control.port
-        if let microphonePort, !format.isAAC, format.channels == 1 {
+        if let microphonePort, !format.isAAC, format.channels == 1, Self.capturesMicrophone {
             microphone = NativeMicrophone(secret: secret, connectionID: connectionID, address: peerAddress, port: microphonePort, format: format)
         }
         data.onPacket = { [weak self] in self?.receive($0) }
@@ -109,6 +113,7 @@ final class CarPlayAudio {
             if let lastTimestamp, Int32(bitPattern: packet.timestamp &- lastTimestamp) <= 0 { latePackets += 1; return }
             lastTimestamp = packet.timestamp
             guard let buffer = try decoder.decode(packet.samples) else { return }
+            onPCM?(buffer)
             // 只有在车机页面上真的有人在要声音时才转发；没人要就让下面的本地播放跑起来，
             // 不然这条音频包会被转发到一个不存在的听众那里，手机和车机同时没声音。
             if let onBrowserAudio, shouldForwardAudio?() ?? true {

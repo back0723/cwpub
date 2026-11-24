@@ -26,6 +26,8 @@ struct ReceiverConfiguration {
     var carLifeEnabled = false
     /// Head unit IPv4 for CarLife discovery; nil sweeps the local network.
     var carLifeAddress: String?
+    /// 把解码后的 PCM 送进 CarLife 的伴音通道，让车机喇叭出声。
+    var carLifeAudio = true
     var zeehoAddress: String?
     var ninebotAddress: String?
     var tailingAddress: String?

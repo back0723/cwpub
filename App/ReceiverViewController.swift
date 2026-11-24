@@ -1,6 +1,7 @@
 import UIKit
 import SwiftUI
 import AVKit
+import AVFoundation
 import Network
 import NetworkExtension
 import CoreLocation
@@ -62,6 +63,14 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         return selectedSoundOutput
     }
     private let videoOutputSwitch = UISwitch()
+    /// CarLife 模式：把解码后的 PCM 送进车机端的伴音通道（车机喇叭出声）。
+    private let carLifeAudioSwitch = UISwitch()
+    /// 麦克风输入：true = iPhone 麦克风，false = 不占用手机麦克风（交给车机）。
+    private var usesPhoneMicrophone: Bool = {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "micSource") != nil else { return true }
+        return defaults.integer(forKey: "micSource") == 0
+    }()
     /// 要不要在 /info 里向 iPhone 声明音频能力。
     /// CarMode 的日志是"音频开启"才拿到 110 屏幕流；我们回 viewAreas 之后 iPhone 只发三种音频/时钟
     /// 资源就不再发 SETUP(streams)，所以浏览器输出这条路即便声音选"手机"也必须声明音频能力，
@@ -290,6 +299,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         super.viewDidLoad()
         title = "YCarWith"
         CarPlayAudio.preferBluetoothOutput = selectedSoundOutput == .bluetooth
+        CarPlayAudio.capturesMicrophone = usesPhoneMicrophone
         navigationItem.largeTitleDisplayMode = .never
         view.backgroundColor = .systemGroupedBackground
         navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "gearshape.fill"), style: .plain, target: self, action: #selector(toggleSettings))
@@ -1099,6 +1109,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
 
         }
         config.carLifeEnabled = outputMode == .carLife
+        config.carLifeAudio = carLifeAudioSwitch.isOn
         let carLifeAddress = (carLifeAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.carLifeAddress = !config.carLifeEnabled || carLifeAddress.isEmpty ? nil : carLifeAddress
     }
@@ -1484,6 +1495,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.sameDevice.start(configuration: live, identity: identity)
             }
             prepareExternalOutput(configuration: config)
+            requestMicrophonePermissionIfNeeded()
             receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
             watchStartupAddress(address)
             return
@@ -1516,7 +1528,30 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             if self.bluetoothSetupSwitch.isOn { self.bluetooth.start(configuration: live) }
         }
         prepareExternalOutput(configuration: config)
+        requestMicrophonePermissionIfNeeded()
         receiver.start(configuration: config, identity: identity)
+    }
+
+    /// 启动时就问一次麦克风权限：不给的话 Opus 麦克风照样“启动”，但送出去的是静音，
+    /// 通话和微信语音的对方什么也听不到。
+    private func requestMicrophonePermissionIfNeeded() {
+        guard usesPhoneMicrophone else { return }
+        let session = AVAudioSession.sharedInstance()
+        switch session.recordPermission {
+        case .undetermined:
+            session.requestRecordPermission { [weak self] granted in
+                DispatchQueue.main.async {
+                    self?.log(granted ? "麦克风权限已允许" : "麦克风权限被拒绝：语音输入和通话会没有声音")
+                    self?.reloadVisibleSettings()
+                }
+            }
+        case .denied:
+            log("麦克风权限被拒绝：请在 iPhone 设置 › YCarWith 中打开「麦克风」")
+        case .granted:
+            break
+        @unknown default:
+            break
+        }
     }
     private var localCarPlayAddress: String? {
         outputMode.usesInstrumentWiFi ? ReceiverConfiguration.wifiIPv4Address() : browserAddress
@@ -1955,6 +1990,8 @@ extension ReceiverViewController {
         updateAirPlayStatus("等待启动 CarPlay。")
         videoOutputSwitch.isOn = defaults.object(forKey: "videoOutputEnabled") as? Bool ?? true
         videoOutputSwitch.addTarget(self, action: #selector(videoOutputToggled), for: .valueChanged)
+        carLifeAudioSwitch.isOn = defaults.object(forKey: "carLifeAudio") as? Bool ?? true
+        carLifeAudioSwitch.addTarget(self, action: #selector(carLifeAudioToggled), for: .valueChanged)
         videoOutputPortField.text = String(defaults.object(forKey: "videoOutputPort") as? Int ?? 9888)
         secureVideoOutputPortField.text = (defaults.object(forKey: "secureVideoOutputPort") as? Int).map { String($0) }
         for (field, label) in [(videoOutputPortField, "HTTP 端口"), (secureVideoOutputPortField, "HTTPS 端口")] {
@@ -2003,6 +2040,15 @@ extension ReceiverViewController {
     @objc private func audioSettingChanged() {
         UserDefaults.standard.set(selectedSoundOutput.rawValue, forKey: "soundOutput")
         CarPlayAudio.preferBluetoothOutput = selectedSoundOutput == .bluetooth
+    }
+    @objc private func carLifeAudioToggled() {
+        UserDefaults.standard.set(carLifeAudioSwitch.isOn, forKey: "carLifeAudio")
+        reloadVisibleSettings()
+    }
+    @objc private func microphoneSourceChanged() {
+        UserDefaults.standard.set(usesPhoneMicrophone ? 0 : 1, forKey: "micSource")
+        CarPlayAudio.capturesMicrophone = usesPhoneMicrophone
+        reloadVisibleSettings()
     }
     @objc private func receiverNameChanged() {
         guard !running else { return }
@@ -2215,6 +2261,9 @@ extension ReceiverViewController {
                         case .bluetooth: return "车机蓝牙"
                         }
                     }) { [unowned self] in self.soundPage() },
+                    .page("麦克风", icon: ("mic.fill", .systemRed), detail: { [unowned self] in
+                        self.usesPhoneMicrophone ? "iPhone 麦克风" : "不占用手机麦克风"
+                    }) { [unowned self] in self.microphonePage() },
                     .control("驾驶位", icon: ("steeringwheel", .systemTeal), driveControl),
                     .page("车辆", icon: ("car.fill", .systemTeal)) { [unowned self] in self.vehiclePage() }
                 ]),
@@ -2375,12 +2424,40 @@ extension ReceiverViewController {
                 ? "更改在下次启动 CarPlay 时生效。使用 Wi-Fi 伴音时，通话和 Siri 留在 iPhone。"
                 : "更改在下次启动 CarPlay 时生效。", rows)]
             if outputMode != .browser {
-                // CarLife 车机端的伴音通道还没接通（车机端 SDK 用 PCM 送到它的 AudioTrack，消息类型
-                // 和通道号还没确认）。先把这条写清楚，免得以为选项漏了。
-                sections.append(SettingsSection(footer: "CarLife 模式目前不给车机送音频：选「车机蓝牙（Bluetooth）」让 iPhone 连上车机蓝牙音乐，声音才从车机喇叭出；选「由 iPhone 输出」就只在手机上响。", [
-                    .info("随画面传输（CarLife 伴音）", "随画面送到车机的伴音通道尚未接通")
-                ]))
+                var audioRow = SettingsRow.control("随画面传输（车机喇叭出声）", icon: ("airplayaudio", .systemBlue), carLifeAudioSwitch)
+                audioRow.subtitle = {
+                    outputMode == .carLife
+                        ? "把解码后的 PCM 送进 CarLife 的伴音通道（通道 3），由车机的音乐模块播放。"
+                        : "把解码后的 PCM 随画面送到接收端。"
+                }
+                sections.append(SettingsSection(footer: outputMode == .carLife
+                    ? "打开后声音由车机的 CarLife 客户端播放：它会按收到的采样率建 AudioTrack，再放我们送的 PCM16。若车机仍然没声，先确认它连上了 9240 端口（日志里的「CarLife 通道 3 已连接」）。"
+                    : "打开后声音随画面送到接收端。", [audioRow]))
             }
+            return sections
+        }
+    }
+
+    fileprivate func microphonePage() -> SettingsPageController {
+        page("麦克风") { [unowned self] in
+            let choices: [(title: String, detail: String, phone: Bool)] = [
+                ("iPhone 麦克风", "用这台 iPhone 的麦克风采集语音，再通过 CarPlay 的输入流送给 iPhone。通话和微信语音时对方能听到你的声音。", true),
+                ("车机麦克风（不占用手机）", "YCarWith 不打开 iPhone 麦克风，语音交给车机和 iPhone 自己的通话通路。某些车机只在它自己接管麦克风时才正常工作；同机接收的架构下这条通路没有音频回传，可能双向无声。", false)
+            ]
+            let rows = choices.map { choice in
+                var row = SettingsRow.action(choice.title, icon: (choice.phone ? "iphone" : "car.side.fill", choice.phone ? .systemBlue : .systemTeal)) { [unowned self] in
+                    self.usesPhoneMicrophone = choice.phone
+                    self.microphoneSourceChanged()
+                }
+                row.subtitle = { choice.detail }
+                row.checked = { [unowned self] in self.usesPhoneMicrophone == choice.phone }
+                return row
+            }
+            let granted = AVAudioSession.sharedInstance().recordPermission == .granted
+            var sections = [SettingsSection(footer: "更改在下次启动 CarPlay 时生效。", rows)]
+            sections.append(SettingsSection("权限", [
+                .info("麦克风权限", granted ? "已允许" : "未允许（请在 iPhone 设置 › YCarWith 中打开「麦克风」）")
+            ]))
             return sections
         }
     }

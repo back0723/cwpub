@@ -8,6 +8,7 @@ import CryptoKit
 import CommonCrypto
 import Security
 import Darwin
+import AVFoundation
 
 /// Sends the CarPlay picture to a head unit's CarLife app and takes its touches and keys back.
 ///
@@ -69,6 +70,11 @@ final class CarLifeOutput {
 
     func append(_ accessUnit: Data, codec: VideoCodec) {
         queue.async { [weak self] in self?.appendOnQueue(accessUnit, codec: codec) }
+    }
+
+    /// 把 CarPlay 解码出来的 PCM 交给车机端的伴音通道（CarLife 音乐模块，通道 3）。
+    func appendAudio(_ buffer: AVAudioPCMBuffer) {
+        queue.async { [weak self] in self?.session?.audio(buffer) }
     }
 
     func stop() { queue.async { [weak self] in self?.stopOnQueue() } }
@@ -571,9 +577,17 @@ private final class Session {
         self.peer = peer; self.width = width; self.height = height; self.maxFPS = maxFPS; fps = maxFPS
     }
 
+    private static func port(for channel: Int) -> String {
+        CarLifeOutput.ports.indices.contains(channel - 1) ? String(CarLifeOutput.ports[channel - 1]) : "?"
+    }
+
     func attach(_ link: Link) {
         channels.updateValue(link, forKey: link.channel)?.connection.cancel()
-        if link.channel == 1 { log?("车机 \(peer) 已连接") }
+        if link.channel == 1 {
+            log?("车机 \(peer) 已连接")
+        } else {
+            log?("CarLife 通道 \(link.channel) 已连接（端口 \(Self.port(for: link.channel))）")
+        }
     }
     func owns(_ link: Link) -> Bool { channels[link.channel] === link }
     func ownsChannel(_ channel: Int) -> Bool { channels[channel] != nil }
@@ -732,11 +746,91 @@ private final class Session {
         if framesSent == 1 { onState?("CarLife：正在向车机 \(peer) 发送 CarPlay 画面") }
     }
 
+    // MARK: Audio (CarLife 音乐模块，通道 3)
+
+    /// 车机端 CarLife 的音乐模块（`La/a/b/p/a;`）只在通道 3 上收音频：
+    /// · 0x30001 带 CarlifeMusicInit{sampleRate, channelConfig, sampleFormat}，收到就建 AudioTrack；
+    /// · 0x30003 / 0x30004 = 播放 / 暂停，0x30002 = 结束；
+    /// · 0x30006 携带裸 PCM（PCM16 小端），车机把它塞进自己的播放队列。
+    /// 采样率/声道按 CarPlay 实际送来的格式走，channelConfig 用 Android AudioFormat 的常量。
+    private enum MusicCommand {
+        static let initialize = 196_609   // 0x30001
+        static let stop = 196_610         // 0x30002
+        static let play = 196_611         // 0x30003
+        static let pause = 196_612        // 0x30004
+        static let data = 196_614         // 0x30006
+    }
+    private var audioRate = 0, audioChannels = 0
+    private var audioInitAt = DispatchTime(uptimeNanoseconds: 0)
+    private var audioFramesSent = 0
+    private var audioPlayed = false
+    private var loggedNoAudioChannel = false
+    private var lastAudioAt = DispatchTime(uptimeNanoseconds: 0)
+
+    private var audioLink: Link? {
+        // 车机只在通道 3 上认音乐消息；通道没建时不要往别的通道乱发。
+        channels[3]
+    }
+
+    func audio(_ buffer: AVAudioPCMBuffer) {
+        guard active, authenticated else { return }
+        let frames = Int(buffer.frameLength)
+        let channelsInBuffer = Int(buffer.format.channelCount)
+        let rate = Int(buffer.format.sampleRate.rounded())
+        guard frames > 0, channelsInBuffer > 0, rate >= 8000 else { return }
+        guard let link = audioLink else {
+            if !loggedNoAudioChannel {
+                loggedNoAudioChannel = true
+                log?("CarLife：音频通道（通道 3 / 端口 9240）没建立，声音暂时送不上车机")
+            }
+            return
+        }
+        if audioRate != rate || audioChannels != channelsInBuffer {
+            audioRate = rate; audioChannels = channelsInBuffer; audioFramesSent = 0
+            let config = channelsInBuffer == 1 ? 4 : 12   // CHANNEL_OUT_MONO / STEREO
+            let initData = CarLifeProtoWriter().number(1, Int64(rate)).number(2, Int64(config)).number(3, 2).data
+            send(3, MusicCommand.initialize, initData)
+            audioInitAt = .now()
+            send(3, MusicCommand.play)
+            audioPlayed = true
+            log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 PCM16")
+        }
+        // 太久没声（切歌/暂停后恢复）时补一次播放命令，免得车机还停在暂停态。
+        let now = DispatchTime.now().uptimeNanoseconds
+        if !audioPlayed || now - lastAudioAt.uptimeNanoseconds > 1_000_000_000 {
+            send(3, MusicCommand.play); audioPlayed = true
+        }
+        lastAudioAt = .now()
+        guard let pcm = Self.pcm16(buffer) else { return }
+        // 车机端写入跟不上就丢这一小段，别把整条连接堵死。
+        guard link.pendingBytes < 512 * 1024 else { return }
+        guard send(3, MusicCommand.data, pcm) else { return }
+        if audioFramesSent == 0 { log?("CarLife 伴音：已开始向车机送音频（\(pcm.count) 字节/包）") }
+        audioFramesSent += frames
+    }
+
+    /// Float32（AVAudioEngine 的标准格式）→ 交错 PCM16 小端。
+    static func pcm16(_ buffer: AVAudioPCMBuffer) -> Data? {
+        guard let planes = buffer.floatChannelData else { return nil }
+        let frames = Int(buffer.frameLength), channels = Int(buffer.format.channelCount)
+        guard frames > 0, channels > 0 else { return nil }
+        var data = Data(count: frames * channels * 2)
+        data.withUnsafeMutableBytes { raw in
+            guard let out = raw.bindMemory(to: Int16.self).baseAddress else { return }
+            for frame in 0..<frames {
+                for channel in 0..<channels {
+                    let value = max(-1, min(1, Double(planes[channel][frame])))
+                    out[frame * channels + channel] = Int16(value * 32_767)
+                }
+            }
+        }
+        return data
+    }
+
     func tick() {
         guard active, profile != nil else { return }
         let now = DispatchTime.now().uptimeNanoseconds
-        if now - lastSent.uptimeNanoseconds > 1_000_000_000 { send(channels[2] != nil ? 2 : 1, 131074) }
-        // Some head units only recover from decoder resets at a keyframe; keep them regular.
+        if now - lastSent.uptimeNanoseconds > 1_000_000_000 { send(channels[2] != nil ? 2 : 1, 131074) }        // Some head units only recover from decoder resets at a keyframe; keep them regular.
         if streaming, now - lastKeyframeRequest.uptimeNanoseconds >= 1_500_000_000 {
             // 一帧都还没发出去时，同时让上层把缓存 IDR 再回放一次：
             // 车机常常是“先请求画面、后开视频通道”，第一次回放会落在通道还没建的空档上。

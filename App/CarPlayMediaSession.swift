@@ -23,6 +23,8 @@ final class CarPlayMediaSession {
     private var videoPackets = 0
     var onLog: ((String) -> Void)?
     var onBrowserAudio: ((Int, AVAudioPCMBuffer, UInt64) -> Void)?
+    /// 每一路音频（含通话）解码后的 PCM，用来喂 CarLife 车机端的伴音通道。
+    var onAudioPCM: ((Int, AVAudioPCMBuffer) -> Void)?
     /// 车机页面上有没有人在要声音；没人要时音频留给本机播放（CarLife 模式就是这种情况）。
     var browserAudioWanted: (() -> Bool)?
     var onVideo: ((Data, VideoCodec) -> Void)?
@@ -62,9 +64,10 @@ final class CarPlayMediaSession {
                         connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort)
                     output.onLog = { [weak self] in self?.onLog?($0) }
                     output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
+                    let streamType = type.intValue
+                    output.onPCM = { [weak self] buffer in self?.onAudioPCM?(streamType, buffer) }
                     // Keep calls and Siri on the iPhone; only intended playback goes to LAN viewers.
                     if let onBrowserAudio, !requestsMicrophone, !["telephony", "speechrecognition"].contains(audioType) {
-                        let streamType = type.intValue
                         output.onBrowserAudio = { buffer, stamp in onBrowserAudio(streamType, buffer, stamp) }
                     }
                     audio[type.intValue] = output
