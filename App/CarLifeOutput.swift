@@ -764,14 +764,21 @@ private final class Session {
 
     /// 车机端 CarLife 的音乐模块（`La/a/b/p/a;`）只在通道 3 上收音频：
     /// · 0x30001 带 CarlifeMusicInit{sampleRate, channelConfig, sampleFormat}，收到就建 AudioTrack；
-    /// · 0x30003 / 0x30004 = 播放 / 暂停，0x30002 = 结束；
+    /// · 0x30002 = 停止并销毁播放器；0x30003 = 暂停；0x30004 = 播放/继续；0x30005 = 空操作；
     /// · 0x30006 携带裸 PCM（PCM16 小端），车机把它塞进自己的播放队列。
-    /// 采样率/声道按 CarPlay 实际送来的格式走，channelConfig 用 Android AudioFormat 的常量。
+    ///
+    /// 【迷行 4.1.3 无声根因，反编译实锤】之前把 0x30003 当 play、0x30004 当 pause，正好反了：
+    /// 车机 g0() 的 packed-switch 0x30001 起依次是 init/stop/pause/play/noop/data——
+    /// · 0x30003 → `c.a()` → 日志「AudioPlayer pause」→ `AudioTrack.pause()`（真暂停）
+    /// · 0x30004 → `c.c()` → 日志「AudioPlayer resume」→ `AudioTrack.play()`（真播放）
+    /// 于是我们每次 init 后发 0x30003，车机把刚建好的 AudioTrack 立刻暂停，数据一直在写但喇叭永远不出声。
+    /// 对调 play/pause 后，init→0x30004 才会真正 start。
     private enum MusicCommand {
         static let initialize = 196_609   // 0x30001
         static let stop = 196_610         // 0x30002
-        static let play = 196_611         // 0x30003
-        static let pause = 196_612        // 0x30004
+        static let pause = 196_611        // 0x30003（车机是 pause！反编译确认）
+        static let play = 196_612         // 0x30004（车机是 play！反编译确认）
+        static let noop = 196_613         // 0x30005
         static let data = 196_614         // 0x30006
     }
     private var audioRate = 0, audioChannels = 0
