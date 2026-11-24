@@ -93,6 +93,16 @@ final class CarLifeOutput {
         queue.async { [weak self] in self?.session?.setCallActive(active) }
     }
 
+    /// 通话期间把对方声音送进车机通道 3（此刻音乐已被 setCallActive 暂停，通道独占）。
+    /// iPhone 已把通话音频路由给 CarPlay，本机听筒不响，必须由 YCarWith 播出来，
+    /// 否则就会出现「通话时听不到对方」。音乐/导航仍被暂停，通话里不会混入其它音频。
+    func appendVoiceAudio(_ buffer: AVAudioPCMBuffer) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.session?.voiceAudio(buffer)
+        }
+    }
+
     /// 导航播报走车机独立的 TTS 通道 4（命令 0x40001/0x40003），不再混进音乐通道 3。
     func appendNavigationAudio(_ buffer: AVAudioPCMBuffer) {
         queue.async { [weak self] in
@@ -837,6 +847,11 @@ private final class Session {
     private var callActive = false
     private var musicPausedByCall = false
     private var ttsPausedByCall = false
+    /// 通话对方声音（通道3，音乐暂停时独占）独立状态。
+    private var voiceRate = 0, voiceChannels = 0
+    private var voiceInitLink: ObjectIdentifier?
+    private var voicePlayed = false
+    private var lastVoiceReport = DispatchTime(uptimeNanoseconds: 0)
 
     private var audioLink: Link? {
         // 车机只在通道 3 上认音乐消息；通道没建时不要往别的通道乱发。
@@ -932,12 +947,18 @@ private final class Session {
             if !ttsPausedBySilence, ttsLink != nil {
                 send(4, TTSCommand.stop); ttsPausedByCall = true
             }
+            // 通话开始：先停掉通道3，随后 voiceAudio() 会用通话格式重新 init 接管。
+            voicePlayed = false
             log?("CarLife：通话占用，已暂停车机音乐/导航，避免混入通话")
         } else {
             // 通话结束：若之前确实因通话暂停过，恢复播放/重建导航。
+            voicePlayed = false
+            // 音乐此前是在通话格式下 init 的，这里清掉强制下一帧音乐按 44100/2 重新 init，
+            // 否则车机会继续按通话的 48000/1 解析音乐 → 变调/杂音。
+            audioInitLink = nil; audioPlayed = false; pausedBySilence = false; silentSince = nil
             if musicPausedByCall {
                 musicPausedByCall = false
-                if !pausedBySilence, audioLink != nil {
+                if audioLink != nil {
                     send(3, MusicCommand.play); audioPlayed = true; lastPlayAt = .now()
                 }
             }
@@ -1012,6 +1033,41 @@ private final class Session {
         guard send(4, TTSCommand.data, pcm) else { return }
         if ttsFramesSent == 0 { log?("CarLife 导航：已开始向车机送导航播报（\(pcm.count) 字节/包）") }
         ttsFramesSent += frames
+    }
+
+    // MARK: Audio - 通话对方声音（通道 3，音乐暂停时独占）
+    /// 通话期间把对方声音送车机喇叭。iPhone 已把通话音频交给 CarPlay，本机听筒不再出声，
+    /// 若不送到车机就是「听不到对方」。这里刻意不检查 callActive——通话音频正是要送的那一路；
+    /// 音乐/导航已在 setCallActive(true) 里 pause/stop，通道 3/4 此刻只有对方声音。
+    func voiceAudio(_ buffer: AVAudioPCMBuffer) {
+        guard active, authenticated, callActive else { return }
+        let frames = Int(buffer.frameLength)
+        let channelsInBuffer = Int(buffer.format.channelCount)
+        let rate = Int(buffer.format.sampleRate.rounded())
+        guard frames > 0, channelsInBuffer > 0, rate >= 8000 else { return }
+        guard let pcm = Self.pcm16(buffer) else { return }
+        guard let link = audioLink else { return }
+        let linkID = ObjectIdentifier(link)
+        // 通话音频（Opus 48000/1）与刚才的音乐（AAC 44100/2）格式不同，必须重新 init，
+        // 否则车机还按 44100/2 解析 —— 对方声音会出现变调/杂音/无声。
+        if voiceRate != rate || voiceChannels != channelsInBuffer || voiceInitLink != linkID || !voicePlayed {
+            voiceRate = rate; voiceChannels = channelsInBuffer
+            let initData = CarLifeProtoWriter().number(1, Int64(rate)).number(2, Int64(channelsInBuffer)).number(3, 16).data
+            send(3, MusicCommand.initialize, initData)
+            send(3, MusicCommand.play)
+            voicePlayed = true
+            voiceInitLink = linkID
+            audioInitLink = linkID   // 让通话结束后的音乐发现格式变化、重新 init 回 44100/2
+            log?("CarLife 通话：对方声音接管通道3 \(rate) Hz / \(channelsInBuffer) 声道（音乐/导航已暂停）")
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        lastPlayAt = .now(); lastAudioAt = .now()
+        if now >= lastVoiceReport.uptimeNanoseconds, now - lastVoiceReport.uptimeNanoseconds > 5_000_000_000 {
+            lastVoiceReport = .now()
+            log?("CarLife 通话：对方声音正在送车机（通道3）")
+        }
+        guard link.pendingBytes < 512 * 1024 else { return }
+        guard send(3, MusicCommand.data, pcm) else { return }
     }
 
     /// Float32（AVAudioEngine 的标准格式）→ 交错 PCM16 小端。
