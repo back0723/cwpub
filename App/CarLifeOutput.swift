@@ -603,6 +603,11 @@ private final class Session {
 
     func receive(_ wire: CarLifeMessage) throws {
         guard active else { return }
+        // 车机如果对音乐模块有回应（准备/错误码），这里就能看到；一直没有输出说明它压根没派发。
+        if wire.channel == 3, channelThreeInbound < 8 {
+            channelThreeInbound += 1
+            log?("CarLife 通道 3 收到车机消息 id=\(wire.id)，长度 \(wire.payload.count)")
+        }
         let message = try crypto.transform(wire, encrypt: false)
         guard profile != nil || message.id == 98305 else { return }
         func proto() throws -> CarLifeProto { try CarLifeProto(parsing: message.payload) }
@@ -776,6 +781,9 @@ private final class Session {
     private var audioFramesSent = 0
     private var audioPlayed = false
     private var loggedNoAudioChannel = false
+    /// 车机在通道 3 上回过来的消息计数，只记前几条用于诊断。
+    private var channelThreeInbound = 0
+    private var lastPlayAt = DispatchTime(uptimeNanoseconds: 0)
     private var lastAudioAt = DispatchTime(uptimeNanoseconds: 0)
 
     private var audioLink: Link? {
@@ -810,13 +818,14 @@ private final class Session {
             audioInitAt = .now()
             send(3, MusicCommand.play)
             audioPlayed = true
+            lastPlayAt = .now()
             audioInitLink = linkID
             log?("CarLife 伴音：初始化 \(rate) Hz / \(channelsInBuffer) 声道 / 16 位 PCM16（通道 3 已就绪）")
         }
         // 太久没声（切歌/暂停后恢复）时补一次播放命令，免得车机还停在暂停态。
         let now = DispatchTime.now().uptimeNanoseconds
         if !audioPlayed || now - lastAudioAt.uptimeNanoseconds > 1_000_000_000 {
-            send(3, MusicCommand.play); audioPlayed = true
+            send(3, MusicCommand.play); audioPlayed = true; lastPlayAt = .now()
         }
         lastAudioAt = .now()
         guard let pcm = Self.pcm16(buffer) else { return }
@@ -860,6 +869,11 @@ private final class Session {
             lastAudioReport = .now()
             let seconds = audioRate > 0 ? audioFramesSent / audioRate : 0
             log?("CarLife 伴音：已送 \(seconds) 秒音频，通道3\(audioLink == nil ? "未建立" : "已建立")，待写 \(audioLink?.pendingBytes ?? 0) 字节")
+        }
+        // 有些车机把最早的 play 吞掉后一直停在“已初始化未播放”，定期补一次（不会打断正在播的）。
+        if audioRate > 0, audioLink != nil, now - lastPlayAt.uptimeNanoseconds >= 5_000_000_000 {
+            lastPlayAt = .now()
+            send(3, MusicCommand.play)
         }
     }
 

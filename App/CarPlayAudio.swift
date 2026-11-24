@@ -230,7 +230,9 @@ final class CarPlayAudio {
 
         } catch {
             rejected += 1
-            if rejected <= 3 { onLog?("音频数据包被拒绝：\(error.localizedDescription)") }
+            if rejected <= 3 {
+                onLog?("音频数据包被拒绝：\(error.localizedDescription)（\(format.name) \(format.sampleRate) Hz / \(format.channels) 声道，负载 \(wire.count) 字节）")
+            }
         }
     }
     private func browserTimestamp(_ rtp: UInt32, arrival: UInt64) -> UInt64 {
