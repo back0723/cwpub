@@ -4,6 +4,40 @@ import Foundation
 import CryptoKit
 import AVFoundation
 
+/// 车机端迷行 4.1.3 把音频分成两套完全独立的系统（smali 反编译实锤）：
+/// · 音乐模块 La/a/b/p/a;，网络通道 3，命令 0x30001 init / 0x30003 pause / 0x30004 play / 0x30006 data
+/// · 导航 TTS 模块 La/a/b/p/b;，网络通道 4，命令 0x40001 init / 0x40002 stop / 0x40003 data
+/// 两者各有自己的 AudioTrack 与 AudioFocus。以前把音乐、导航、通话全塞进通道 3，
+/// 导致导航播报被当成音乐、44100/48000 交替重建同一个 AudioTrack —— 冲突、卡顿、丢声。
+enum CarLifeAudioRoute: String {
+    case music       // 音乐：通道 3
+    case navigation  // 导航播报/系统提示音：通道 4（TTS）
+    case voice       // 电话/微信语音：不送车机，交给 iPhone 本机蓝牙/听筒
+
+    /// 以 CarPlay 给出的 audioType 为准，stream type 作辅助。
+    /// 102(media) 一定是音乐；telephony/speechRecognition 一定是通话；
+    /// alert/navigation 是导航播报；其余(default/101) 保守当音乐，保证一定有声音。
+    static func classify(streamType: Int, audioType: String) -> CarLifeAudioRoute {
+        let kind = audioType.lowercased()
+        if ["telephony", "speechrecognition"].contains(kind) { return .voice }
+        if streamType == 100 && kind.isEmpty == false && kind != "media" && kind != "default" {
+            // stream 100 上的非媒体类型（alert 等）按导航/提示音处理
+            return .navigation
+        }
+        if ["alert", "navigation", "navi", "tts"].contains(kind) { return .navigation }
+        if streamType == 102 { return .music }
+        return .music
+    }
+}
+
+/// 一路解码后的音频帧及其去向。onAudioPCM 用它把音乐/导航/通话分到车机不同通道。
+struct CarLifeAudioFrame {
+    let buffer: AVAudioPCMBuffer
+    let streamType: Int
+    let audioType: String
+    let route: CarLifeAudioRoute
+}
+
 final class CarPlayMediaSession {
     private let queue: DispatchQueue
     private let secret: SymmetricKey
@@ -23,8 +57,8 @@ final class CarPlayMediaSession {
     private var videoPackets = 0
     var onLog: ((String) -> Void)?
     var onBrowserAudio: ((Int, AVAudioPCMBuffer, UInt64) -> Void)?
-    /// 每一路音频（含通话）解码后的 PCM，用来喂 CarLife 车机端的伴音通道。
-    var onAudioPCM: ((Int, AVAudioPCMBuffer) -> Void)?
+    /// 每一路解码后的 PCM 及其分类，用来喂 CarLife 车机端的音乐/导航通道；通话不送车机。
+    var onAudioPCM: ((CarLifeAudioFrame) -> Void)?
     /// 车机页面上有没有人在要声音；没人要时音频留给本机播放（CarLife 模式就是这种情况）。
     var browserAudioWanted: (() -> Bool)?
     var onVideo: ((Data, VideoCodec) -> Void)?
@@ -56,30 +90,44 @@ final class CarPlayMediaSession {
                           let bits = stream["audioFormat"] as? NSNumber else { throw ProtocolError.malformed("音频 SETUP 字段") }
                     let format = try ReceiverAudioFormat(bits: bits.uint64Value)
                     let audioType = (stream["audioType"] as? String ?? "").lowercased()
-                    let requestsMicrophone = type.intValue == 100 && ["telephony", "speechrecognition", "default"].contains(audioType)
+                    let streamType = type.intValue
+                    let route = CarLifeAudioRoute.classify(streamType: streamType, audioType: audioType)
+                    let requestsMicrophone = streamType == 100 && ["telephony", "speechrecognition", "default"].contains(audioType)
                         && ((stream["input"] as? Bool) == true || (stream["dataPort"] as? NSNumber)?.intValue ?? 0 > 0)
                     let microphonePort = requestsMicrophone ? (stream["dataPort"] as? NSNumber).flatMap { UInt16(exactly: $0.intValue) }.flatMap { $0 > 0 ? $0 : nil } : nil
-                    audio.removeValue(forKey: type.intValue)?.stop()
-                    // 通话/语音流（telephony / speechrecognition）标记 isVoice：
-                    // CarPlayAudio 据此在本机绝不抢 AVAudioSession 路由，避免顶断微信通话。
-                    let isVoice = ["telephony", "speechrecognition"].contains(audioType)
+                    audio.removeValue(forKey: streamType)?.stop()
+                    // 通话流（telephony / speechrecognition）标记 isVoice：CarPlayAudio 据此在本机绝不抢
+                    // AVAudioSession 路由，微信/电话才能继续用自己的蓝牙/听筒，双方都听得到。
+                    let isVoice = route == .voice
                     let output = try CarPlayAudio(secret: secret, peerAddress: peerAddress,
                         connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort, isVoice: isVoice)
                     output.onLog = { [weak self] in self?.onLog?($0) }
-                    output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
-                    let streamType = type.intValue
-                    output.onPCM = { [weak self] buffer in self?.onAudioPCM?(streamType, buffer) }
-                    // 修复：微信/电话的通话音频（stream 100 / telephony）原来被这里排除，
-                    // 导致网页版和车机浏览器永远收不到通话声音（"双方听不到"）。
-                    // 现在所有音频流——包括音乐、通话、Siri——解码后一律转发给网页/车机浏览器，
-                    // 由 shouldForwardAudio（页面是否要点声音）决定本机是否让位，不再按 audioType 一刀切。
+                    if isVoice {
+                        // 通话声音必须留在 iPhone 本机（微信/电话的蓝牙或听筒路由），
+                        // 绝不能被 CarLife 伴音的"恒转发"逻辑送走，否则对方声音在本机彻底消失。
+                        output.shouldForwardAudio = { false }
+                    } else {
+                        output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
+                    }
+                    // 导航/通话只交给车机对应通道，本机 AVAudioEngine 不再重复播放，避免车机与手机双份声音。
+                    output.onPCM = { [weak self] buffer in
+                        let frame = CarLifeAudioFrame(buffer: buffer, streamType: streamType, audioType: audioType, route: route)
+                        self?.onAudioPCM?(frame)
+                    }
+                    // 网页/车机浏览器：通话流也转发，由 shouldForwardAudio 决定本机是否让位。
                     if let onBrowserAudio {
                         output.onBrowserAudio = { buffer, stamp in onBrowserAudio(streamType, buffer, stamp) }
                     }
-                    audio[type.intValue] = output
+                    audio[streamType] = output
                     replies.append(["type": type, "dataPort": output.dataPort, "controlPort": output.controlPort,
                                     "streamConnectionID": connectionID])
-                    onLog?("音频流 \(type) 已就绪：\(format.name) \(format.sampleRate) Hz / \(format.channels) 声道")
+                    let routeText: String
+                    switch route {
+                    case .music: routeText = "音乐→车机通道3"
+                    case .navigation: routeText = "导航→车机通道4(TTS)"
+                    case .voice: routeText = "通话→本机蓝牙/听筒(不送车机)"
+                    }
+                    onLog?("音频流 \(type) 已就绪：\(format.name) \(format.sampleRate) Hz / \(format.channels) 声道，audioType=\(audioType.isEmpty ? "无" : audioType)，\(routeText)")
                     continue
                 }
                 guard type.intValue == 110, let connectionID = stream["streamConnectionID"] as? NSNumber else {
