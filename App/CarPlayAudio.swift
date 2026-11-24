@@ -69,6 +69,10 @@ final class CarPlayAudio {
     private var latePackets = 0
     private var overflowPackets = 0
     private var underruns = 0
+    /// 媒体音频（102 AAC）的载荷体征：真机上解码一直 -50，得先看清 iPhone 到底送了多大的包。
+    private var minPayload = Int.max
+    private var maxPayload = 0
+    private var decodedPackets = 0
     private var nextStatistics = 0.0
     private var retryPlaybackAt = 0.0
     /// 通話/其他音頻占用時只記一次日誌，避免每包刷屏。
@@ -110,12 +114,14 @@ final class CarPlayAudio {
         guard active else { return }
         do {
             let packet = try cipher.receive(wire)
+            minPayload = min(minPayload, packet.samples.count); maxPayload = max(maxPayload, packet.samples.count)
             let arrival = DispatchTime.now().uptimeNanoseconds / 1000
             // Decode every accepted compressed packet to preserve the codec's overlap state.
             packets += 1
             if let lastTimestamp, Int32(bitPattern: packet.timestamp &- lastTimestamp) <= 0 { latePackets += 1; return }
             lastTimestamp = packet.timestamp
             guard let buffer = try decoder.decode(packet.samples) else { return }
+            decodedPackets += 1
             onPCM?(buffer)
             // 只有在车机页面上真的有人在要声音时才转发；没人要就让下面的本地播放跑起来，
             // 不然这条音频包会被转发到一个不存在的听众那里，手机和车机同时没声音。
@@ -131,13 +137,11 @@ final class CarPlayAudio {
                 retryPlaybackAt = now + 0.5
                 #if os(iOS)
                 let session = AVAudioSession.sharedInstance()
-                // 通话 / 微信语音正在占用音频时不要去改类别、不要 setActive：
-                // 那会把正在通话的会话顶掉，对方那边直接断线。
-                if session.isOtherAudioPlaying {
-                    if !loggedOtherAudio { loggedOtherAudio = true; onLog?("检测到通话/其他音频占用，暂不抢占音频输出") }
-                    return
+                // 通话 / 微信语音期间不能“让出”：那段声音正是要由我们转给车机/本机播放的，
+                // 让出就变成双方都听不到。这里只记一次日志，照常占住会话。
+                if session.isOtherAudioPlaying, !loggedOtherAudio {
+                    loggedOtherAudio = true; onLog?("通话占用音频：本 App 继续接管播放，把对方声音转给车机")
                 }
-                loggedOtherAudio = false
                 let needsDuplexCategory = microphone != nil || Self.hasSpeakerOverride
                 var options: AVAudioSession.CategoryOptions = needsDuplexCategory ? [.defaultToSpeaker] : []
                 if Self.preferBluetoothOutput { options.insert(.allowBluetoothA2DP) }
@@ -226,7 +230,7 @@ final class CarPlayAudio {
             let now = ProcessInfo.processInfo.systemUptime
             if now >= nextStatistics {
                 nextStatistics = now + 5
-                onLog?("音频状态：数据包=\(packets)，队列=\(queuedFrames * 1000 / format.sampleRate)ms，欠载=\(underruns)，延迟=\(latePackets)，溢出=\(overflowPackets)，拒绝=\(rejected)")
+            onLog?("音频状态：数据包=\(packets)，队列=\(queuedFrames * 1000 / format.sampleRate)ms，欠载=\(underruns)，延迟=\(latePackets)，溢出=\(overflowPackets)，拒绝=\(rejected)，载荷=\(minPayload == Int.max ? 0 : minPayload)–\(maxPayload) 字节，解出=\(decodedPackets)")
             }
 
         } catch {
@@ -381,7 +385,8 @@ final class NativeAudioDecoder {
             let input = AVAudioCompressedBuffer(format: compressed, packetCapacity: 1, maximumPacketSize: payload.count)
             input.packetCount = 1; input.byteLength = UInt32(payload.count)
             payload.withUnsafeBytes { input.data.copyMemory(from: $0.baseAddress!, byteCount: payload.count) }
-            input.packetDescriptions?.pointee = AudioStreamPacketDescription(mStartOffset: 0, mVariableFramesInPacket: format.isOpus ? 0 : 1024, mDataByteSize: UInt32(payload.count))
+            input.packetDescriptions?.pointee = AudioStreamPacketDescription(mStartOffset: 0,
+                mVariableFramesInPacket: format.isOpus ? 0 : (format.isAAC ? 0 : 1024), mDataByteSize: UInt32(payload.count))
             guard let pcm = AVAudioPCMBuffer(pcmFormat: output, frameCapacity: format.isOpus ? AVAudioFrameCount(format.sampleRate * 120 / 1000) : 4096) else { throw ProtocolError.malformed("AAC 输出缓冲区") }
             var supplied = false, error: NSError?
             let status = converter.convert(to: pcm, error: &error) { _, state in
@@ -454,20 +459,12 @@ private final class NativeMicrophone {
             // 后台播音时系统常把会话留在 .playback（或带 .mixWithOthers），此时开录音必然
             // 报 cannotStartRecording（561145187）。录音前把会话摆回可录状态，并明确用内建麦克风。
             let session = AVAudioSession.sharedInstance()
-            // 正在打电话 / 微信语音：这时候把类别改成 playAndRecord 会直接掐断那通电话，
-            // 所以先让出，等对方放完再开麦克风。
-            if session.isOtherAudioPlaying {
-                if !loggedWaitingForAudio {
-                    loggedWaitingForAudio = true
-                    onLog?("通话/其他音频正在占用，麦克风先让出，通话结束后自动开启")
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                    guard let self, self.active, !self.installedTap else { return }
-                    self.beginCapture()
-                }
-                return
+            // 正在打电话 / 微信语音：我们本身就是那台“车机”，通话的上下行都必须由我们转，
+            // 所以这里不能再让出（v5.21 的让出正是“对方听不到我、我也听不到对方”的原因）。
+            if session.isOtherAudioPlaying, !loggedWaitingForAudio {
+                loggedWaitingForAudio = true
+                onLog?("检测到通话占用：继续占用音频会话，由本 App 转接通话上下行")
             }
-            loggedWaitingForAudio = false
             if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
                 try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
             }
