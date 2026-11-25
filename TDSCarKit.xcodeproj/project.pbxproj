@@ -444,7 +444,7 @@
 					"@executable_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.3;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ycarwith.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carplay.app;
 				PRODUCT_NAME = TDSCarKit;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
@@ -481,7 +481,7 @@
 					"@executable_path/Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.3;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ycarwith.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.carplay.app;
 				PRODUCT_NAME = TDSCarKit;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
