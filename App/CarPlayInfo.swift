@@ -96,6 +96,14 @@ enum CarPlayInfo {
         return info
     }
 
+    /// 打印给日志看的能力摘要：in/out 都写出来，便于对照 iPhone 到底接受了哪条。
+    static func audioFormatSummary(audio: Bool) -> String {
+        guard audio else { return "音频未声明" }
+        return "100 compatibility(0x8854/0x54) · 101 compatibility(0x8800/0) · 100 default(0x30000050/0x30000050)"
+            + " · 100 media(0x8800/0) · 100 alert(0x40008800/0) · 100 speechRecognition(0x20000040/0x20000040)"
+            + " · 101 default(0x40008800/0) · 102 media(AAC 0xc00000/0)"
+    }
+
     /// Width of a square PNG from its IHDR chunk; nil unless it is square and at most 192 px.
     static func vehicleButtonSize(in config: ReceiverConfiguration) -> Int? {
         guard let png = config.oemIconPNG else { return nil }
