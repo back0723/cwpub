@@ -167,7 +167,11 @@ final class NativeReceiver {
             // 并由页面上的"开始投屏"按钮发起会话，所以这里不能顺手把页面服务一起停掉。
             self.stopOnQueue(keepingBrowser: self.browserRunning)
             CarPlayAudio.outputMuted = false
-            self.installCallMuteObserver()
+            // 不再安装 interruption 静音观察者：旧逻辑来电时给 iPhone 发暂停键、挂断后靠
+            // .ended（微信语音常不到）补播放键，实测「已暂停音乐」后一直等不到「已恢复」，
+            // 音乐被卡在暂停态、挂断后车机哑。现在即使完整声明 telephony 让 iOS 把通话流推来，
+            // 也在下游归为 .voice：对方声音送车机通道3、你的声音由麦克风上行回 iPhone；
+            // 来电暂停/挂断恢复全由 iOS 系统自己管理，App 不插手。
             self.wireBrowserOutput()
             self.displaySize = (configuration.width, configuration.height)
             if let target = configuration.zeehoAddress {
@@ -692,9 +696,9 @@ final class NativeReceiver {
             }
             // 通话流照常接受，绝不回 415：实测 iOS(20G75) 收到 415 后会拆掉整个 CarPlay 会话
             //（日志：连续两条 415 → 视频通道关闭 → 控制连接断开 → 车机画面卡死、触控全失效）。
-            // 通话隔离交给下游既有逻辑保证：CarPlayMediaSession 把 telephony/speechRecognition 归为 .voice，
-            // CarPlayAudio(isVoice) 不碰本机 AVAudioSession、不起麦克风；onAudioPCM 里 .voice 直接
-            // 丢弃不送车机。于是通话声留在 iPhone 蓝牙 HFP / 听筒，CarPlay 只负责画面与音乐导航。
+            // 通话照常建立：CarPlayMediaSession 把 telephony/speechRecognition 归为 .voice，
+            // 下游 onAudioPCM 把对方声音送车机通道3（暂停音乐/导航独占）、麦克风上行回 iPhone，
+            // 实现通话双向都走 CarPlay WiFi。绝不回 415（会拆会话卡屏）。
             if state.media == nil {
                 let media = CarPlayMediaSession(queue: queue, secret: secret, peerAddress: state.peerAddress,
                                                 audioEnabled: configuration.audioEnabled, hevc: configuration.videoCodec == .h265)
@@ -709,16 +713,21 @@ final class NativeReceiver {
                 }
                 // CarLife 车机端的音频分流：迷行 4.1.3 有音乐(通道3)与导航TTS(通道4)两套独立系统。
                 // 以前不分类型全塞通道3，导致导航被当音乐、格式交替重建 AudioTrack（冲突/卡顿/丢声）；
-                // 通话流塞通道3 则会在通话时混进车机音乐。现在按 CarPlay audioType 分到对应通道，
-                // 通话流根本不送车机，交给 iPhone 本机蓝牙/听筒。
+                // 通话流用 setCallActive 暂停音乐/导航后独占通道3播对方声音，不与音乐混淆。
                 let carLifeOn = configuration.carLifeEnabled
                 let carLifeAudioOn = configuration.carLifeAudio
                 media.onAudioPCM = { [weak self] frame in
                     guard let self else { return }
                     if frame.route == .voice {
-                        // 通话已完全交给 iPhone 自身 / 蓝牙 HFP：CarPlay 不再承载通话语音，
-                        // 这里不再占车机通道3，也不再暂停音乐与导航（通话独立后「暂停」已无意义）。
-                        // 万一 iOS 仍推来通话流，直接丢弃，车机按蓝牙 HFP 出声。
+                        // 所有音频与通话走 CarPlay：iPhone 已把通话音频路由进来，本机听筒不响，
+                        // 必须把对方声音送车机通道3播出来（你的声音由麦克风上行回 iPhone）。
+                        // 同时暂停车机音乐/导航，通话里不混入其它声音；2 秒没新语音帧再恢复。
+                        self.carLife.setCallActive(true)
+                        self.carLife.appendVoiceAudio(frame.buffer)
+                        self.voiceReleaseWork?.cancel()
+                        let work = DispatchWorkItem { [weak self] in self?.carLife.setCallActive(false) }
+                        self.voiceReleaseWork = work
+                        self.queue.asyncAfter(deadline: .now() + 2.0, execute: work)
                         return
                     }
                     // 有非通话音频流在跑，说明音乐确实在播放；用于通话前暂停、通话后续播的判断。
@@ -732,8 +741,10 @@ final class NativeReceiver {
                     switch frame.route {
                     case .navigation:
                         self.carLife.appendNavigationAudio(frame.buffer)
-                    case .music, .voice:
+                    case .music:
                         self.carLife.appendAudio(frame.buffer)
+                    case .voice:
+                        break // 通话流已在开头 return，这里仅为 switch 穷尽，绝不送车机
                     }
                 }
                 // 【声音重复/音质差/停播后仍响 根因】音频送到车机有两条路：
