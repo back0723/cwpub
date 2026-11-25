@@ -28,7 +28,7 @@ enum BrowserReceiverPage {
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <link rel="icon" href="data:,">
-<title>YCarWith</title>
+<title>Carplay</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#05070b;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
 main{position:relative;width:100%;height:100%}video,canvas{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
@@ -87,7 +87,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 </style>
 </head>
 <body><main><video id="video" muted autoplay playsinline disablepictureinpicture disableremoteplayback></video><canvas id="view" hidden></canvas><canvas id="hold" hidden></canvas><div id="touch"></div></main>
-<div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 YCarWith…</span></div><div class="toolbar">
+<div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 Carplay…</span></div><div class="toolbar">
   <button id="menuBtn" hidden>菜单</button>
   <div id="menuPanel" hidden>
     <p class="miTitle">浏览器已接入</p>
@@ -451,7 +451,7 @@ const hex2=n=>{const s=n.toString(16);return s.length<2?'0'+s:s};
 const viewerHex=Array.from(viewerBytes,b=>hex2(b)).join('');
 const viewerID=viewerHex.replace(/^(........)(....)(....)(....)(............)$/,'$1-$2-$3-$4-$5');
 function connect(){
- setStatus('正在连接 YCarWith…');
+ setStatus('正在连接 Carplay…');
  ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/stream`);ws.binaryType='arraybuffer';
  ws.onopen=()=>{
   ping();
@@ -542,7 +542,7 @@ function configureWC(m){
   wcConfiguring=false;wcPending=[];
   if(tryMSE(m,'低延迟解码不可用'))return;
   report('error','WebCodecs 不可用：'+e.message);teardown();
-  setStatus(m.name==='H.265'?'此浏览器无法播放 H.265。请在 YCarWith 改用 H.264 后重启 CarPlay。':'此浏览器无法解码当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
+  setStatus(m.name==='H.265'?'此浏览器无法播放 H.265。请在 Carplay 改用 H.264 后重启 CarPlay。':'此浏览器无法解码当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
   retryTimer=setTimeout(()=>{retryTimer=0;boot()},15000);
  });
 }
@@ -653,7 +653,7 @@ function formatMSE(m){
  report('info',`${navigator.userAgent.slice(0,140)}；MSE ${m.codec} 支持=${ok}`);
  if(!ok){
   report('error',`不支持 ${mime}`);holdFrame();teardown();
-  setStatus(m.name==='H.265'?'此浏览器不支持 H.265。请在 YCarWith 改用 H.264 后重启 CarPlay。':'此浏览器不支持当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
+  setStatus(m.name==='H.265'?'此浏览器不支持 H.265。请在 Carplay 改用 H.264 后重启 CarPlay。':'此浏览器不支持当前 H.264。请试用 720P、30 FPS，或更新车机浏览器。','bad');
   // Retry slowly: once the iPhone switches codec this page recovers by itself.
   if(!retryTimer)retryTimer=setTimeout(()=>{retryTimer=0;boot()},15000);return}
  try{source=media.addSourceBuffer(mime)}catch(e){restart('无法创建解码器：'+e.message);return}
