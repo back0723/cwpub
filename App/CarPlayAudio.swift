@@ -93,6 +93,9 @@ final class CarPlayAudio {
     var onPCM: ((AVAudioPCMBuffer) -> Void)?
     /// 车机页面上是否真的有人在要声音。返回 false（或未设置）时音频在本机播放。
     var shouldForwardAudio: (() -> Bool)?
+    /// 未转发到接收端时是否允许本机播放：「由 iPhone 输出」为 true；
+    /// 「随画面传输」但接收端没连上时为 false——保持静默，不回落到 iPhone。
+    var shouldPlayLocally: (() -> Bool)?
     /// 声音选项选了"车机蓝牙"：本机播放时优先把音频送到车机蓝牙（A2DP），而不是手机扬声器。
     static var preferBluetoothOutput = false
     /// 麦克风输入设置：true 用 iPhone 麦克风，false 不占用手机麦克风（交给车机/系统）。
@@ -101,15 +104,24 @@ final class CarPlayAudio {
     /// AVAudioSession 路由：微信已经持有通话会话，任何 setCategory/setActive/overrideOutputAudioPort
     /// 都会把微信顶断（真机日志：改路由后立刻「操作已中断」→ 微信挂断）。声音只送 CarLife 通道3/网页。
     private let isVoice: Bool
-    init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil, isVoice: Bool = false) throws {
+    /// 是否为导航流（101）：用于跨流共享的「导航播报活跃窗口」。
+    private let isNavigation: Bool
+    /// 导航播报活跃窗口：导航流收到有声 PCM 时续期 1.5 秒，音乐流据此把音量压到 50%。
+    static var navigationActiveUntil = DispatchTime(uptimeNanoseconds: 0)
+    /// 设置「导航播报时音乐降低 50%」的开关，默认开启。
+    static var duckMusicForNavigation = true
+    init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil, isVoice: Bool = false, isNavigation: Bool = false) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format; self.isVoice = isVoice
+        self.isNavigation = isNavigation
         decoder = try NativeAudioDecoder(format: format)
         output = decoder.output
         cipher = AudioStream(secret: secret, connectionID: connectionID)
         data = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
         control = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
         dataPort = data.port; controlPort = control.port
-        if let microphonePort, !format.isAAC, format.channels == 1, Self.capturesMicrophone {
+        // CarPlay 已不再声明 telephony 输入（通话交给蓝牙 HFP 或手机自身）。
+        // 通话/语音流一律不再起本机麦克风：否则会和系统通话抢音频会话，把微信顶断。
+        if let microphonePort, !format.isAAC, format.channels == 1, Self.capturesMicrophone, !isVoice {
             microphone = NativeMicrophone(secret: secret, connectionID: connectionID, address: peerAddress, port: microphonePort, format: format)
         }
         data.onPacket = { [weak self] in self?.receive($0) }
@@ -127,6 +139,9 @@ final class CarPlayAudio {
             lastTimestamp = packet.timestamp
             guard let buffer = try decoder.decode(packet.samples) else { return }
             decodedPackets += 1
+            // 导航播报压低音乐：导航流有声音就续期 1.5 秒；音乐流在窗口内把 PCM 缩放到 50%。
+            // 缩放发生在 onPCM / 浏览器转发 / 本机播放之前，三条出口音量一致。
+            if isNavigation { Self.noteNavigation(buffer) }
             onPCM?(buffer)
             // 【对方听不到根因】通话流(isVoice)在 CarLife 模式下 shouldForwardAudio 恒 true，
             // 会在下面 onBrowserAudio 分支直接 return，永远走不到旧代码里"本机播放分支"的
@@ -141,9 +156,16 @@ final class CarPlayAudio {
             // 只有在车机页面上真的有人在要声音时才转发；没人要就让下面的本地播放跑起来，
             // 不然这条音频包会被转发到一个不存在的听众那里，手机和车机同时没声音。
             if let onBrowserAudio, shouldForwardAudio?() ?? true {
-                onBrowserAudio(buffer, browserTimestamp(packet.timestamp, arrival: arrival))
+                // 「随画面传输（车机/浏览器）」那一路才降音；由 iPhone 输出走下面的本机播放，
+                // 用未缩放的原始 buffer，完全不受导航降音开关影响。
+                let ducking = !isNavigation && !isVoice && Self.duckMusicForNavigation
+                    && DispatchTime.now().uptimeNanoseconds < Self.navigationActiveUntil.uptimeNanoseconds
+                onBrowserAudio(ducking ? Self.duckedCopy(buffer, 0.5) : buffer,
+                               browserTimestamp(packet.timestamp, arrival: arrival))
                 return
             }
+            // 「随画面传输」但接收端没连上：保持静默，不回落 iPhone 本机播放。
+            if let shouldPlayLocally, !shouldPlayLocally() { return }
             let frames = Int(buffer.frameLength)
             guard queuedFrames + frames <= format.sampleRate * 2 else { overflowPackets += 1; return }
             if !playing {
@@ -272,6 +294,43 @@ final class CarPlayAudio {
             }
         }
     }
+    /// 导航播报判定：PCM 峰值超过阈值即视为播报中，窗口续期 1.5 秒。
+    private static func noteNavigation(_ buffer: AVAudioPCMBuffer) {
+        guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return }
+        var peak: Float = 0
+        let frames = Int(buffer.frameLength)
+        let channel = data[0]
+        for i in 0..<frames {
+            let value = abs(channel[i])
+            if value > peak { peak = value }
+        }
+        guard peak > 0.02 else { return }
+        navigationActiveUntil = DispatchTime(uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_500_000_000)
+    }
+
+    /// 就地缩放 float PCM 的幅度（gain<1 降低音量），用于导航播报时的音乐 ducking。
+    private static func scalePCM(_ buffer: AVAudioPCMBuffer, _ gain: Float) {
+        guard let data = buffer.floatChannelData else { return }
+        let frames = Int(buffer.frameLength)
+        for channel in 0..<Int(buffer.format.channelCount) {
+            let samples = data[channel]
+            for i in 0..<frames { samples[i] *= gain }
+        }
+    }
+
+    /// 复制一份缩放的 PCM，只给浏览器/车机那一路用，避免污染本机播放的原始 buffer。
+    private static func duckedCopy(_ buffer: AVAudioPCMBuffer, _ gain: Float) -> AVAudioPCMBuffer {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength),
+              let source = buffer.floatChannelData, let target = copy.floatChannelData else { return buffer }
+        copy.frameLength = buffer.frameLength
+        let frames = Int(buffer.frameLength)
+        for channel in 0..<Int(buffer.format.channelCount) {
+            let s = source[channel], t = target[channel]
+            for i in 0..<frames { t[i] = s[i] * gain }
+        }
+        return copy
+    }
+
     private func browserTimestamp(_ rtp: UInt32, arrival: UInt64) -> UInt64 {
         if let anchor = browserClock {
             let samples = Int64(Int32(bitPattern: rtp &- anchor.rtp))
