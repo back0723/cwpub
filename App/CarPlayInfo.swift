@@ -19,6 +19,13 @@ enum CarPlayInfo {
 
     static func features(audio: Bool) -> UInt64 { audio ? 0x615653aee2 : 0x615653aee2 & ~UInt64(0x10004540a00) }
 
+    /// 设置 → CarPlay → 声音 里的排查开关：把 100 telephony(0x70000150) 加回音频声明，
+    /// 等于完整还原历史能出声那份 /info（另外还带 HID 电话键）。默认关。
+    /// 打开后通话可能被拉进 CarPlay（配件没有麦克风，双方都会没声），仅供定位问题。
+    static var audioFormatsCompat: Bool {
+        UserDefaults.standard.object(forKey: "audioFormatsCompat") as? Bool ?? false
+    }
+
     /// 30–60 in steps of 5 (round half up), as the iPhone expects for maxFPS.
     static func sanitizedFPS(_ fps: Int) -> Int {
         let clamped = min(60, max(30, fps))
@@ -53,7 +60,10 @@ enum CarPlayInfo {
             "model": "CarWithin1,1", "manufacturer": "CarWithin", "deviceID": config.deviceID,
             "bluetoothIDs": [config.deviceID], "name": config.name, "rightHandDrive": config.rightHandDrive,
             "keepAliveLowPower": false, "keepAliveSendStatsAsBody": false, "modes": modes,
-            "extendedFeatures": ["enhancedRequestCarUI"],
+            // vocoderInfo 不能省：我们仍声明 default / speechRecognition 这类语音通道的输入输出格式，
+            // 少了 vocoderInfo，iPhone 认为配件不懂语音编解码，整个音频图（含 media/alert）都不建，
+            // 实测表现为 SETUP 只有 110 视频流、100/101/102 一条都不发，车机全程无声。
+            "extendedFeatures": ["vocoderInfo", "enhancedRequestCarUI"],
             "displays": [display], "hidDevices": hidDevices]
         if config.videoCodec == .h265 { info["hevcInfo"] = [String: Any]() }
         if let icon = config.oemIconPNG, let size = vehicleButtonSize(in: config) {
@@ -69,9 +79,9 @@ enum CarPlayInfo {
             // Siri：能力声明保留（default / speechRecognition 都是无线 CarPlay 音频协商的一部分，
             // 删了 iPhone 会连一条音乐流都不建），但 App 内没有任何 Siri 入口、不发 requestSiri、
             // 也不申请麦克风端口，功能上完全不使用 Siri。
-            let types: [(Int, String)] = [(100,"compatibility"),(101,"compatibility"),(100,"default"),
+            var types: [(Int, String)] = [(100,"compatibility"),(101,"compatibility"),(100,"default"),
                 (100,"media"),(100,"alert"),(100,"speechRecognition"),(101,"default")]
-            let profiles: [(Int, String, Int, Int)] = [
+            var profiles: [(Int, String, Int, Int)] = [
                 (100, "compatibility", 0x8854, 0x54),
                 (101, "compatibility", 0x8800, 0),
                 (100, "default", 0x30000050, 0x30000050),
@@ -83,6 +93,11 @@ enum CarPlayInfo {
                 // v5.26 试过只声明 PCM(0x8800)，iPhone 连 102 的 SETUP 都不发（日志里只剩「已请求媒体流 110，
                 // 音频格式 无」），音乐全留在手机扬声器上，所以声明必须回到 AAC（0xc00000）。
                 (102, "media", 0xc00000, 0)]
+            // 排查开关打开时，把通话音频通道加回声明，完整还原历史那份 /info。
+            if audioFormatsCompat {
+                types.insert((100, "telephony"), at: 5)
+                profiles.insert((100, "telephony", 0x70000150, 0x70000150), at: 5)
+            }
             info["audioFormats"] = profiles.map { type, audioType, output, input -> [String: Any] in
                 var entry: [String: Any] = ["type": type, "audioType": audioType, "audioOutputFormats": output]
                 if input != 0 { entry["audioInputFormats"] = input }
@@ -99,8 +114,10 @@ enum CarPlayInfo {
     /// 打印给日志看的能力摘要：in/out 都写出来，便于对照 iPhone 到底接受了哪条。
     static func audioFormatSummary(audio: Bool) -> String {
         guard audio else { return "音频未声明" }
-        return "100 compatibility(0x8854/0x54) · 101 compatibility(0x8800/0) · 100 default(0x30000050/0x30000050)"
-            + " · 100 media(0x8800/0) · 100 alert(0x40008800/0) · 100 speechRecognition(0x20000040/0x20000040)"
+        var text = "100 compatibility(0x8854/0x54) · 101 compatibility(0x8800/0) · 100 default(0x30000050/0x30000050)"
+            + " · 100 media(0x8800/0) · 100 alert(0x40008800/0)"
+        if audioFormatsCompat { text += " · 100 telephony(0x70000150/0x70000150)［兼容模式］" }
+        return text + " · 100 speechRecognition(0x20000040/0x20000040)"
             + " · 101 default(0x40008800/0) · 102 media(AAC 0xc00000/0)"
     }
 
