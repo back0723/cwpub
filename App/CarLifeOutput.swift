@@ -1077,7 +1077,9 @@ private final class Session {
 
     // MARK: Audio - 通话对方声音（通道 3，音乐暂停时独占）
     /// 通话期间把对方声音送车机喇叭。iPhone 已把通话音频交给 CarPlay，本机听筒不再出声，
-    /// 若不送到车机就是「听不到对方」。这里刻意不检查 callActive——通话音频正是要送的那一路；
+    /// 若不送到车机就是「听不到对方」。
+    /// callActive 由 NativeReceiver 收到 voice 帧时先置 true（同一串行 queue，顺序有保证），
+    /// 这里检查它是为了防止车机未就绪/通话态未建立时误写通道 3；不可去掉。
     /// 音乐/导航已在 setCallActive(true) 里 pause/stop，通道 3/4 此刻只有对方声音。
     func voiceAudio(_ buffer: AVAudioPCMBuffer) {
         guard active, authenticated, callActive else { return }
