@@ -25,6 +25,9 @@ final class BackgroundKeepAlive {
     private var watchdog: Timer?
     private var restarts = 0
     private var lastReviveAt = Date.distantPast
+    /// 音频中断（来电/微信/FaceTime）期间为 true。微信 VoIP 不一定把
+    /// isOtherAudioPlaying 置 true，光靠那个标志拦不住 revive，必须自己记状态。
+    private var interrupted = false
     private(set) var isRunning = false
     var onLog: ((String) -> Void)?
 
@@ -41,6 +44,7 @@ final class BackgroundKeepAlive {
     func start() -> Bool {
         guard !isRunning else { return true }
         Self.setHolding(true)
+        interrupted = false
         guard play(reason: nil) else { Self.setHolding(false); return false }
         isRunning = true; restarts = 0
         let center = NotificationCenter.default
@@ -51,15 +55,18 @@ final class BackgroundKeepAlive {
                 if type == .began {
                     // 来电 / 微信语音 / FaceTime：先暂停，但不放弃音频会话。
                     // 一旦让出，iOS 约 10 秒后就挂起 App，CarLife 与 CarPlay 一起断。
+                    self.interrupted = true
                     self.player?.pause()
-                    self.onLog?("通话占用了音频，后台保持稍后自动重试（不抢麦、不中断通话）")
-                    // 立刻安排一次恢复，不要等看门狗 2 秒后再碰运气（3 秒节流仍然生效）。
+                    self.onLog?("通话占用了音频，暂停后台保活重试（不抢麦、不碰路由，让手机系统通话稳定进行）")
+                    // 仍在 0.8 秒后尝试一次；但 revive() 内会检查 isOtherAudioPlaying，
+                    // 通话未结束时直接跳过，避免搅乱手机系统通话的音频会话。通话结束后由"中断结束"事件恢复。
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                         self?.revive(reason: "通话中断后重试")
                     }
                     return
                 }
                 // Resume whether or not iOS sets shouldResume: staying silent means being suspended.
+                self.interrupted = false
                 self.revive(reason: "音频中断结束")
             },
             center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
@@ -96,8 +103,13 @@ final class BackgroundKeepAlive {
 
     private func revive(reason: String) {
         guard isRunning else { return }
-        // 通话/微信语音占用期间也重试静音播放：只用 mixWithOthers，不抢麦、不独占、不改路由，
-        // 所以不会把通话掐断；但能让 App 保住「音频」后台模式，CarLife/CarPlay 不断线。
+        // 【通话期间不抢会话】通话/微信语音占用期间绝不 revive。
+        // 旧逻辑在通话中仍 setActive(true)+播静音，会把手机系统通话的会话搅乱、路由改成 Speaker，
+        // 进而顶断通话和 CarPlay 会话（22:27:45 DefunctConnection）。本版上行交给手机系统通话，
+        // 更要保证 App 不碰它的会话。保住后台是"锦上添花"，冲突时让位给通话。
+        // 用自己记的 interrupted 为主判据：微信 VoIP 通话期间 isOtherAudioPlaying 常为 false，
+        // 只看它会漏拦。通话中的 revive 会 setActive(true)+播静音，正是顶断会话的元凶。
+        if interrupted || AVAudioSession.sharedInstance().isOtherAudioPlaying { return }
         // 事件会成串来（一次路由变化 + 看门狗），节流到 3 秒内最多一次。
         guard Date().timeIntervalSince(lastReviveAt) >= 3 else { return }
         lastReviveAt = Date()
