@@ -690,6 +690,20 @@ final class NativeReceiver {
             guard state.cipher != nil, state.authenticated, let secret = state.verify?.mediaSecret else {
                 throw ProtocolError.malformed("在配件会话通过验证前收到 SETUP")
             }
+            // 通话不接管：兼容档会声明 telephony，iOS 一有电话就把 100/telephony（有时先来
+            // 100/speechrecognition）的音频流开到配件这边。我们没有麦克风，接了就双方都没声。
+            // 这里对"整条 SETUP 都是通话/语音流"的情况直接回 415，让 iOS 把通话退回车机蓝牙 HFP
+            // 或 iPhone 本身；媒体流（102/100 media）照常建，音乐不受影响。
+            if CarPlayInfo.callFreeActive,
+               let object = try? PropertyListSerialization.propertyList(from: request.body, format: nil),
+               let plist = object as? [String: Any],
+               let streams = plist["streams"] as? [[String: Any]], !streams.isEmpty {
+                let kinds = streams.map { (($0["audioType"] as? String) ?? "").lowercased() }
+                if kinds.allSatisfy({ $0 == "telephony" || $0 == "speechrecognition" }) {
+                    log("已拒绝通话音频流（通话不接管）：通话留在车机蓝牙或 iPhone，CarPlay 不接管")
+                    return RTSPResponse(status: 415, reason: "Unsupported Media Type")
+                }
+            }
             if state.media == nil {
                 let media = CarPlayMediaSession(queue: queue, secret: secret, peerAddress: state.peerAddress,
                                                 audioEnabled: configuration.audioEnabled, hevc: configuration.videoCodec == .h265)
