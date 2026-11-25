@@ -238,6 +238,17 @@ final class NativeReceiver {
                 } catch { self.fail("无线音频编解码器不可用：\(error.localizedDescription)"); return }
             }
             self.log("请求 \(configuration.width)×\(configuration.height) @ \(configuration.maxFPS) FPS，\(configuration.videoCodec.displayName)；音频\(configuration.audioEnabled ? "已启用（PCM/AAC/Opus）" : "已关闭")")
+            self.log("音频声明：\(CarPlayInfo.audioFormatSummary(audio: configuration.audioEnabled))")
+            let selfCheckRun = self.generation
+            self.queue.asyncAfter(deadline: .now() + 15) { [weak self] in
+                guard let self, self.generation == selfCheckRun else { return }
+                let setups = CarPlayMediaSession.audioSetups
+                if setups.isEmpty {
+                    self.log("⚠️ 启动 15 秒仍没收到任何音频流（100/101/102）：iPhone 没接受 audioFormats，车机不会有声")
+                } else {
+                    self.log("已建立音频流：\(setups.joined(separator: "，"))")
+                }
+            }
             self.startSessionAfterHeadUnitScreen(configuration: configuration, identity: identity, onReady: listening)
         }
     }
@@ -369,6 +380,8 @@ final class NativeReceiver {
     private var callTimer: Timer?
     private var wasPlayingBeforeCall = false
     private var callMutedAt = Date.distantPast
+    private var lastLoggedMuteSecond = 0
+    private var loggedKeepAliveLoss = false
     private func installCallMuteObserver() {
         guard callMuteObserver == nil else { return }
         callMuteObserver = NotificationCenter.default.addObserver(
@@ -385,8 +398,16 @@ final class NativeReceiver {
             guard let self, CarPlayAudio.outputMuted else { return }
             self.queue.async {
                 guard CarPlayAudio.outputMuted else { return }
-                if Date().timeIntervalSince(self.callMutedAt) > 30,
-                   !AVAudioSession.sharedInstance().isOtherAudioPlaying {
+                let seconds = Int(Date().timeIntervalSince(self.callMutedAt))
+                if seconds - self.lastLoggedMuteSecond >= 10 {
+                    self.lastLoggedMuteSecond = seconds
+                    self.log("通话静音已持续 \(seconds) 秒（持续发送 -80 dB 静音帧）")
+                }
+                if seconds >= 10, !BackgroundKeepAlive.holdsAudioSession, !self.loggedKeepAliveLoss {
+                    self.loggedKeepAliveLoss = true
+                    self.log("通话中后台保持没拿到音频会话：挂断后可能被挂起，续播时会自动恢复")
+                }
+                if seconds > 30, !AVAudioSession.sharedInstance().isOtherAudioPlaying {
                     self.endCallOnQueue()
                 }
             }
@@ -398,6 +419,8 @@ final class NativeReceiver {
     private func beginCallOnQueue() {
         CarPlayAudio.outputMuted = true
         callMutedAt = Date()
+        lastLoggedMuteSecond = 0
+        loggedKeepAliveLoss = false
         wasPlayingBeforeCall = assumedPlaying
         guard wasPlayingBeforeCall, let media = activeMedia else {
             log("通话开始：车机静音（音乐本来没在播）")
@@ -420,6 +443,14 @@ final class NativeReceiver {
         assumedPlaying = true
         wasPlayingBeforeCall = false
         log("通话结束：已恢复音乐播放")
+        // 自检：2 秒后如果仍没有非静音 PCM 回来，说明播放键没落地，补发一次（只补一次）。
+        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, !CarPlayAudio.outputMuted, self.assumedPlaying else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now - CarPlayAudio.lastAudibleAt.uptimeNanoseconds > 2_000_000_000 else { return }
+            self.activeMedia?.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.play.rawValue]), release: Data([0]))
+            self.log("通话结束：2 秒没等到音频流，已补发一次播放键")
+        }
     }
 
     func stop() { queue.async { [weak self] in self?.stopOnQueue(keepingBrowser: true) } }
