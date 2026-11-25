@@ -27,7 +27,14 @@ struct ReceiverConfiguration {
     /// Head unit IPv4 for CarLife discovery; nil sweeps the local network.
     var carLifeAddress: String?
     /// 把解码后的 PCM 送进 CarLife 的伴音通道，让车机喇叭出声。
-    var carLifeAudio = true
+    /// 声音页现在只提供「由 iPhone 输出」与「随画面传输（Wi‑Fi）」两种，
+    /// 因此这个开关固定为 false，保留字段只为兼容旧配置。
+    var carLifeAudio = false
+    /// 声音输出：true = 解码后的 PCM 随画面送浏览器（网页播放）；false = iPhone 本机播放。
+    var audioToBrowser = false
+    /// 「由 iPhone 输出」：只有它为 true 时，未连上接收端才允许本机播放；
+    /// 「随画面传输」连不上时保持静默，不回落到 iPhone。
+    var audioLocal = false
     var zeehoAddress: String?
     var ninebotAddress: String?
     var tailingAddress: String?
