@@ -56,6 +56,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let navDuckingSwitch = UISwitch()
     /// 排查用：把 100 telephony 通话音频通道加回 /info 声明（历史能出声那份原样）。
     private let audioFormatsCompatSwitch = UISwitch()
+    /// 通话不接管：兼容档里只让 CarPlay 播音乐，通话留在车机蓝牙/iPhone（默认开）。
+    private let callFreeSwitch = UISwitch()
     /// 要不要在 /info 里向 iPhone 声明音频能力。
     /// CarMode 的日志是"音频开启"才拿到 110 屏幕流；我们回 viewAreas 之后 iPhone 只发三种音频/时钟
     /// 资源就不再发 SETUP(streams)，所以浏览器输出这条路即便声音选"手机"也必须声明音频能力，
@@ -2037,6 +2039,8 @@ extension ReceiverViewController {
         navDuckingSwitch.addTarget(self, action: #selector(navDuckingToggled), for: .valueChanged)
         audioFormatsCompatSwitch.isOn = defaults.object(forKey: "audioFormatsCompat") as? Bool ?? false
         audioFormatsCompatSwitch.addTarget(self, action: #selector(audioFormatsCompatToggled), for: .valueChanged)
+        callFreeSwitch.isOn = defaults.object(forKey: "callFreeCarPlay") as? Bool ?? true
+        callFreeSwitch.addTarget(self, action: #selector(callFreeToggled), for: .valueChanged)
         CarLifeOutput.navigationDuckingEnabled = navDuckingSwitch.isOn
         CarPlayAudio.duckMusicForNavigation = navDuckingSwitch.isOn
         videoOutputPortField.text = String(defaults.object(forKey: "videoOutputPort") as? Int ?? 9888)
@@ -2101,6 +2105,11 @@ extension ReceiverViewController {
     @objc private func audioFormatsCompatToggled() {
         UserDefaults.standard.set(audioFormatsCompatSwitch.isOn, forKey: "audioFormatsCompat")
         log("音频声明兼容模式已\(audioFormatsCompatSwitch.isOn ? "打开" : "关闭")，下次启动 CarPlay 生效")
+        reloadVisibleSettings()
+    }
+    @objc private func callFreeToggled() {
+        UserDefaults.standard.set(callFreeSwitch.isOn, forKey: "callFreeCarPlay")
+        log("通话不接管已\(callFreeSwitch.isOn ? "打开" : "关闭")，下次启动 CarPlay 生效")
         reloadVisibleSettings()
     }
     @objc private func receiverNameChanged() {
@@ -2443,13 +2452,16 @@ extension ReceiverViewController {
             var duckRow = SettingsRow.control("导航播报时音乐降低 50%", icon: ("speaker.wave.1.fill", .systemOrange), navDuckingSwitch)
             duckRow.subtitle = { "导航播报期间把音乐压到一半，播报结束自动恢复；关闭则音量不变。" }
             var compatRow = SettingsRow.control("音频声明兼容模式（加回通话音频通道）", icon: ("waveform", .systemRed), audioFormatsCompatSwitch)
-            compatRow.subtitle = { "排查用，默认关闭。打开后重启 CarPlay 生效：把 100 telephony 加回 /info 音频声明，等于历史能出声那份原样。副作用是通话可能被拉进 CarPlay，而配件没有麦克风。" }
+            compatRow.subtitle = { "排查用，默认关闭。打开后重启 CarPlay 生效：把 100 telephony 加回 /info 音频声明，等于历史能出声那份原样。音乐就是靠这条才有声，日常请保持打开。" }
+            var callFreeRow = SettingsRow.control("通话不接管（电话留在蓝牙或手机）", icon: ("phone.arrow.up.right", .systemGreen), callFreeSwitch)
+            callFreeRow.subtitle = { "默认打开，仅在兼容模式打开时生效。CarPlay 只播音乐和导航，通话音频流一律拒绝，通话走车机蓝牙 HFP 或 iPhone 本身。若打开后音乐又没声，把它关掉即可回到现在的可用状态。" }
             let sections = [
                 SettingsSection(footer: "声音随画面走 Wi‑Fi：CarLife 模式由车机播放，浏览器模式由浏览器播放；未连接时保持静默，不回落 iPhone。", [
                     .info("随画面传输（Wi‑Fi）", "解码后的 PCM 随画面送到接收端，连接建立后自动出声，断开时自动暂停音乐。")
                 ]),
                 SettingsSection(footer: "只影响音乐随画面传输到接收端时的音量。", [duckRow]),
-                SettingsSection(footer: "用来区分「缺少通话音频通道」与「其它未声明项」。测完请关回。", [compatRow])
+                SettingsSection(footer: "用来区分「缺少通话音频通道」与「其它未声明项」。测完请关回。", [compatRow]),
+                SettingsSection(footer: "通话和音乐两条路分开：音乐随画面进车机，通话完全不经过 CarPlay。", [callFreeRow])
             ]
             return sections
         }
