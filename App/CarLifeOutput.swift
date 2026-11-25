@@ -107,6 +107,12 @@ final class CarLifeOutput {
         queue.async { [weak self] in self?.session?.setCallActive(active) }
     }
 
+    /// 「导航播报时音乐降低 50%」开关：设置页写这里，真正做增益的是内部 Session。
+    static var navigationDuckingEnabled: Bool {
+        get { Session.navigationDuckingEnabled }
+        set { Session.navigationDuckingEnabled = newValue }
+    }
+
     /// 通话期间把对方声音送进车机通道 3（此刻音乐已被 setCallActive 暂停，通道独占）。
     /// iPhone 已把通话音频路由给 CarPlay，本机听筒不响，必须由 YCarWith 播出来，
     /// 否则就会出现「通话时听不到对方」。音乐/导航仍被暂停，通话里不会混入其它音频。
