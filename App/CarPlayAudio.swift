@@ -59,6 +59,9 @@ final class CarPlayAudio {
     private let decoder: NativeAudioDecoder
     private var microphone: NativeMicrophone?
     private var microphoneStarted = false
+    /// 上行麦克风启动失败后的限次重试（最多 3 次、每次间隔 2 秒）。
+    /// 通话刚建立那一瞬会话类别可能尚未稳定为可录，重试能抓住随后切好的窗口。
+    private var microphoneRetries = 0
     private var queuedFrames = 0
     private var active = true
     private var playing = false
@@ -173,6 +176,18 @@ final class CarPlayAudio {
             if let microphone, isVoice, !microphoneStarted {
                 microphoneStarted = true
                 microphone.onLog = onLog
+                microphone.onStartFailed = { [weak self] in
+                    guard let self, self.active, self.microphoneRetries < 3 else { return }
+                    self.microphoneRetries += 1
+                    let delay = self.microphoneRetries
+                    self.onLog?("上行麦克风将在 \(delay) 秒后重试（第 \(self.microphoneRetries)/3 次）")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay)) { [weak self] in
+                        guard let self, self.active else { return }
+                        // 保持 microphoneStarted = true：receive() 每帧都会检查这个标志，
+                        // 若置回 false 会导致下一帧再触发一次 start()，重复装 tap / 发双份音频。
+                        microphone.start()
+                    }
+                }
                 DispatchQueue.main.async { microphone.start() }
             }
             // 只有在车机页面上真的有人在要声音时才转发；没人要就让下面的本地播放跑起来，
@@ -580,6 +595,9 @@ private final class NativeMicrophone {
     private var peakLevel: Float = 0
     private var lastUplinkReport: DispatchTime = .now()
     var onLog: ((String) -> Void)?
+    /// 上行采集启动失败（如会话切可录被系统拒绝）时回调，让上层限次重试，
+    /// 避免「一次失败终身哑」——通话刚建立那一瞬会话类别可能还没稳定。
+    var onStartFailed: (() -> Void)?
     init(secret: SymmetricKey, connectionID: UInt64, address: String, port: UInt16, format: ReceiverAudioFormat) {
         self.rate = format.sampleRate; self.format = format
         packetizer = MicrophonePacketizer(secret: secret, connectionID: connectionID)
@@ -613,14 +631,31 @@ private final class NativeMicrophone {
             if callInProgress {
                 let recordable = session.category == .playAndRecord || session.category == .record
                 if !recordable {
-                    if !loggedWaitingForAudio {
-                        loggedWaitingForAudio = true
-                        let cats = session.category.rawValue
-                        onLog?("麦克风无法启动：通话占用且会话不可录（类别 \(cats)）。对方将听不到你说话——这是 iOS 会话类别限制，需 iPhone 侧通话把音频路由交给 CarPlay 才可用")
+                    // 真机日志实锤：普通电话和微信通话时，后台保活静音播放器 + 通话混音会把本 App
+                    // 的会话留在 .playback（只播放、不可录）。旧逻辑在这里直接 return，上行麦克风
+                    // 从头到尾没启动 → 对方永远听不到你说话（21:08:45「会话不可录」）。
+                    // 新逻辑：会话不可录时主动切到 .playAndRecord 再装 tap。
+                    // · 切成功 → 上行恢复（build39 曾实测麦克风启动成功）。
+                    // · 系统独占麦克风拒绝切换 → 如实放弃，不中断通话本身。
+                    // 已经可录的会话（微信 VoIP 常如此）不进来这里，不会被顶断。
+                    do {
+                        try session.setCategory(.playAndRecord, mode: .default,
+                                                options: [.defaultToSpeaker, .allowBluetooth])
+                        try session.setActive(true)
+                        if let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
+                            try? session.setPreferredInput(builtIn)
+                        }
+                        onLog?("通话中会话已从不可录切到可录，启动上行麦克风")
+                    } catch {
+                        if !loggedWaitingForAudio {
+                            loggedWaitingForAudio = true
+                            onLog?("麦克风无法启动：通话中切可录会话被系统拒绝（\(error.localizedDescription)），稍后重试")
+                        }
+                        onStartFailed?()
+                        return
                     }
-                    return
                 }
-                // 会话已可录（微信通话通常就是 playAndRecord）：直接装 tap，不改类别、不 setActive。
+                // 会话现在可录：直接装 tap，不再改类别。
             } else {
                 // 没有其它 App 占用：正常建立可录会话。
                 if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
@@ -664,9 +699,14 @@ private final class NativeMicrophone {
                 loggedFailure = true
                 let session = AVAudioSession.sharedInstance()
                 let inputs = session.availableInputs?.map { $0.portType.rawValue }.joined(separator: ",") ?? "无"
-                onLog?("无法启动麦克风：\(error.localizedDescription)（类别 \(session.category.rawValue)，输入 \(inputs)，权限 \(Self.permissionText())）")
+                onLog?("无法启动麦克风：\(error.localizedDescription)（类别 \(session.category.rawValue)，输入 \(inputs)，权限 \(Self.permissionText())），稍后重试")
             }
-            stop()
+            onStartFailed?()
+            // 不能调用 stop()：它会把 active 置 false，导致限次重试时 start() 的
+            // `guard active` 直接失败，永远哑。失败只清理本次已装的 tap / 引擎，
+            // 保留 active 与连接，等上层延时重试重新走 beginCapture。
+            if installedTap { engine.inputNode.removeTap(onBus: 0); installedTap = false }
+            engine.stop()
         }
     }
     private var loggedFailure = false
