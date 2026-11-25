@@ -5,19 +5,19 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleDisplayName</key>
-	<string>YCarWith</string>
+	<string>Carplay</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
-	<string>YCarWith</string>
+	<string>Carplay</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.9.10</string>
+	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>44</string>
+	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
@@ -26,7 +26,7 @@
 		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>YCarWith 需要使用蓝牙来发现并连接 CarPlay 设备。</string>
+	<string>Carplay 需要使用蓝牙来发现并连接 CarPlay 设备。</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_airplay._tcp</string>
@@ -34,11 +34,11 @@
 		<string>_carplay-ctrl._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>YCarWith 需要访问本地网络，以接收 CarPlay 音视频，并在你选择时把画面或声音发送给局域网接收设备。</string>
+	<string>Carplay 需要访问本地网络，以接收 CarPlay 音视频，并在你选择时把画面或声音发送给局域网接收设备。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>YCarWith 仅使用定位权限读取当前 Wi-Fi 名称，不会收集位置坐标。</string>
+	<string>Carplay 仅使用定位权限读取当前 Wi-Fi 名称，不会收集位置坐标。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>YCarWith 用于画面投屏与音频播放，不采集麦克风（通话与 Siri 均不在 CarPlay 上承载）。</string>
+	<string>Carplay 使用麦克风采集你的声音，用于 CarPlay 通话时让对方听到你说话。</string>
 	<key>TDSWiFiNameDetection</key>
 	<string>$(TDS_WIFI_NAME_DETECTION)</string>
 	<key>UIApplicationSceneManifest</key>
