@@ -53,6 +53,10 @@ final class BackgroundKeepAlive {
                     // 一旦让出，iOS 约 10 秒后就挂起 App，CarLife 与 CarPlay 一起断。
                     self.player?.pause()
                     self.onLog?("通话占用了音频，后台保持稍后自动重试（不抢麦、不中断通话）")
+                    // 立刻安排一次恢复，不要等看门狗 2 秒后再碰运气（3 秒节流仍然生效）。
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                        self?.revive(reason: "通话中断后重试")
+                    }
                     return
                 }
                 // Resume whether or not iOS sets shouldResume: staying silent means being suspended.
