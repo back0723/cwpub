@@ -128,9 +128,10 @@ final class CarPlayAudio {
         data = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
         control = try AudioDatagramPort(queue: Self.renderQueue, peerAddress: peerAddress)
         dataPort = data.port; controlPort = control.port
-        // CarPlay 已不再声明 telephony 输入（通话交给蓝牙 HFP 或手机自身）。
-        // 通话/语音流一律不再起本机麦克风：否则会和系统通话抢音频会话，把微信顶断。
-        if let microphonePort, !format.isAAC, format.channels == 1, Self.capturesMicrophone, !isVoice {
+        // 所有音频与通话走 CarPlay：通话流也要起本机麦克风，把你的声音采集后经 dataPort 上行回
+        // iPhone，对方才听得到。仅音乐/导航（isVoice=false）且带输入方向时才会有 microphonePort，
+        // 这里按格式能力守住：非 AAC、单声道、capturesMicrophone 开着才创建。
+        if let microphonePort, !format.isAAC, format.channels == 1, Self.capturesMicrophone {
             microphone = NativeMicrophone(secret: secret, connectionID: connectionID, address: peerAddress, port: microphonePort, format: format)
         }
         data.onPacket = { [weak self] in self?.receive($0) }
@@ -615,7 +616,7 @@ private final class NativeMicrophone {
                     if !loggedWaitingForAudio {
                         loggedWaitingForAudio = true
                         let cats = session.category.rawValue
-                        onLog?("麦克风无法启动：通话占用且会话不可录（类别 \(cats)）。通话走 iPhone 本机时由微信/电话用自己的麦克风；若要车机侧说话，请把通话音频路由交给 YCarWith")
+                        onLog?("麦克风无法启动：通话占用且会话不可录（类别 \(cats)）。对方将听不到你说话——这是 iOS 会话类别限制，需 iPhone 侧通话把音频路由交给 CarPlay 才可用")
                     }
                     return
                 }
@@ -672,7 +673,7 @@ private final class NativeMicrophone {
     static func permissionText() -> String {
         switch AVAudioSession.sharedInstance().recordPermission {
         case .granted: return "已允许"
-        case .denied: return "已拒绝（去 设置 > YCarWith 打开麦克风）"
+        case .denied: return "已拒绝（去 设置 > Carplay 打开麦克风）"
         case .undetermined: return "未询问"
         @unknown default: return "未知"
         }
