@@ -678,7 +678,7 @@ private final class NativeMicrophone {
             // 兜底：个别机型/时序下 prepare 后采样率仍可能为 0，用硬件实际采样率重建一个合法格式。
             if input.sampleRate <= 0 || input.channelCount <= 0,
                let fallback = AVAudioFormat(standardFormatWithSampleRate: session.sampleRate > 0 ? session.sampleRate : 48000,
-                                            channels: max(1, session.inputNumberOfChannels)) {
+                                            channels: AVAudioChannelCount(max(1, session.inputNumberOfChannels))) {
                 input = fallback
             }
             guard input.sampleRate > 0, input.channelCount > 0,
