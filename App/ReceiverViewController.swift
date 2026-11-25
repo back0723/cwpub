@@ -1510,7 +1510,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.sameDevice.start(configuration: live, identity: identity)
             }
             prepareExternalOutput(configuration: config)
-            requestMicrophonePermissionIfNeeded()
             receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
             watchStartupAddress(address)
             return
