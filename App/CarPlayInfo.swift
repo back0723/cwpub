@@ -19,22 +19,17 @@ enum CarPlayInfo {
 
     static func features(audio: Bool) -> UInt64 { audio ? 0x615653aee2 : 0x615653aee2 & ~UInt64(0x10004540a00) }
 
-    /// 固定开启：把 100 telephony(0x70000150) 加回音频声明，等于完整还原历史能出声那份 /info。
-    /// 只有声明 telephony，iPhone 才会把整个 CarPlay 音频图建起来（媒体流 102 才会建立、音乐才从车机出声）。
-    /// 关掉它实测只有视频流 110、100/101/102 一条都不发，音乐全留在手机扬声器。
-    /// 通话不会因此被拉进 CarPlay——由下面的 callFreeCarPlay 保证。
-    /// 已按要求移除设置开关、避免误操作关掉导致无声，因此这里恒为 true。
+    /// 固定开启：完整声明 100 telephony（输出与输入都非零），让 iPhone 建立完整 CarPlay 音频图。
+    /// 本版目标 = 所有音频与通话都走 CarPlay WiFi：音乐/导航从车机通道3/4出声，通话对方声音
+    /// 送车机通道3播出、你的声音由麦克风采集后经 dataPort 上行回 iPhone——即 build39 的完整配方。
+    /// 实测：只有带非零输入的完整声明，iPhone 才发媒体流102、才把通话流推给配件；输入写0 或
+    /// 不声明都只剩视频流110、全程没声。本版不回 415（拆会话卡屏）、不启来电静音（卡恢复分支）。
     static var audioFormatsCompat: Bool { true }
 
-    /// 固定开启：通话不接管。
-    /// 兼容档必须声明 telephony，iPhone 才会把媒体音频图建起来（音乐才有声）；但同一份声明也会
-    /// 让 iOS 把通话音频流开到 CarPlay 这边。这里不再回 415 拒接（实测 iOS 收到 415 会拆掉整个
-    /// 会话导致车机画面卡死），而是照常建立通话流，靠下游把它归为 .voice：不送车机、不碰本机
-    /// 音频路由、不起麦克风，通话声音自然留在车机蓝牙 HFP 或 iPhone 本身，CarPlay 只管画面与媒体。
-    /// 电话键仍然保留，让 CarPlay 当第二屏能点拨打/接听（按键只是上报给 iPhone，由 iPhone 执行通话）。
-    /// 已按要求移除设置开关、避免误操作，因此这里恒为 true。
+    /// 固定开启：通话由 CarPlay 接管（不再"不接管"）——麦克风上行 + voice 下行送车机，
+    /// 电话键保留，CarPlay 当第二屏能点拨打/接听，按键只上报给 iPhone 由它执行通话。
     static var callFreeCarPlay: Bool { true }
-    /// 当前这套声明是不是"通话不接管"模式（只有兼容档打开时才有意义）。
+    /// 仅表示当前是否为完整声明档，不再驱动任何拒接/静音分支。
     static var callFreeActive: Bool { audioFormatsCompat && callFreeCarPlay }
 
     /// 30–60 in steps of 5 (round half up), as the iPhone expects for maxFPS.
@@ -68,8 +63,7 @@ enum CarPlayInfo {
         ]
         // 保留电话键：CarPlay 当 iPhone 的第二屏，来电能在车机点接听、平时能点拨打。
         // 接听/拨打动作只是 HID 按键上报给 iPhone，由 iPhone 真正执行通话；
-        // 通话音频流照常建立，但归为 .voice 后不送车机、不碰本机音频路由，
-        // 通话声音留在车机蓝牙 HFP 或手机本身，不占车机音乐通道。
+        // 通话音频走 CarPlay：对方声音送车机通道3、你的声音由麦克风采集上行回 iPhone。
         hidDevices.append(hidDevice(HID.telephony, name: "CarWithin 电话键", descriptor: telephonyDescriptor))
         var info: [String: Any] = ["sourceVersion": "509.11", "features": NSNumber(value: features(audio: config.audioEnabled)), "statusFlags": 4,
             "model": "CarWithin1,1", "manufacturer": "CarWithin", "deviceID": config.deviceID,
@@ -88,12 +82,12 @@ enum CarPlayInfo {
             info["oemIcons"] = [["imageData": icon, "widthPixels": size, "heightPixels": size, "prerendered": true] as [String: Any]]
         }
         if config.audioEnabled {
-            // 通话故意不声明 telephony：一旦声明，iOS 就把通话塞进 CarPlay 并要求配件供麦；
-            // 本机录音又被 Playback 会话锁死（OSStatus '!int'），结果对方听不到、微信被顶掉。
-            // 实测车机蓝牙 HFP 双向可用，去掉后通话留在蓝牙，CarPlay 只做屏幕与媒体。
-            // Siri：能力声明保留（default / speechRecognition 都是无线 CarPlay 音频协商的一部分，
-            // 删了 iPhone 会连一条音乐流都不建），但 App 内没有任何 Siri 入口、不发 requestSiri、
-            // 也不申请麦克风端口，功能上完全不使用 Siri。
+            // 完整声明 telephony（输入/输出都非零）：这是 iPhone 建立 CarPlay 音频图、发媒体流102、
+            // 推送通话流100 的必要条件。通话双向都走 CarPlay WiFi：对方声音送车机通道3、
+            // 你的声音由麦克风采集经 dataPort 上行回 iPhone。不回 415（会拆会话卡屏）、
+            // 不做来电静音干预（曾卡在恢复分支致挂断后车机哑）。
+            // Siri：default / speechRecognition 是无线 CarPlay 音频协商的一部分，保留声明
+            //（删了 iPhone 会连一条音乐流都不建），但 App 内没有 Siri 入口、不发 requestSiri。
             var types: [(Int, String)] = [(100,"compatibility"),(101,"compatibility"),(100,"default"),
                 (100,"media"),(100,"alert"),(100,"speechRecognition"),(101,"default")]
             var profiles: [(Int, String, Int, Int)] = [
@@ -108,12 +102,10 @@ enum CarPlayInfo {
                 // v5.26 试过只声明 PCM(0x8800)，iPhone 连 102 的 SETUP 都不发（日志里只剩「已请求媒体流 110，
                 // 音频格式 无」），音乐全留在手机扬声器上，所以声明必须回到 AAC（0xc00000）。
                 (102, "media", 0xc00000, 0)]
-            // 必须把通话音频通道按"输入/输出都非零"完整声明（和唯一实测能出声的 build39 一致）：
-            // iOS 只有在 telephony 带非零输入格式时才会建立整个 CarPlay 音频图，媒体流 102 才会发出、
-            // 音乐和导航才从车机出声。之前"输入写 0"骗 iOS 没麦克风的做法，实测连音频图都不建、全程没声。
-            // 通话不因此进车机：通话流照常建立后被归为 .voice —— 不送车机、不碰本机音频路由、不起麦克风，
-            // 声音留在车机蓝牙 HFP 或手机；电话键只上报 iPhone。注意绝不能回 415 拒接通话流，
-            // 实测 iOS 收到 415 会拆掉整个 CarPlay 会话、导致车机画面卡死。
+            // 完整声明 telephony（输入/输出都非零）：这是 iPhone 建立 CarPlay 音频图、发出媒体流102
+            // 与通话流的必要条件。此前「输入写0骗 iOS 没麦克风」实测连音频图都不建、全程没声。
+            // 本版要让所有音频与通话都走 CarPlay，必须完整声明；通话隔离不靠 415（拆会话卡屏）
+            // 也不靠静音干预（卡恢复分支），而是通话时暂停车机音乐/导航、对方声音独占通道3播出。
             if audioFormatsCompat {
                 types.insert((100, "telephony"), at: 5)
                 profiles.insert((100, "telephony", 0x70000150, 0x70000150), at: 5)
@@ -137,7 +129,7 @@ enum CarPlayInfo {
         var text = "100 compatibility(0x8854/0x54) · 101 compatibility(0x8800/0) · 100 default(0x30000050/0x30000050)"
             + " · 100 media(0x8800/0) · 100 alert(0x40008800/0)"
         if audioFormatsCompat {
-            text += " · 100 telephony(0x70000150/0x70000150)［完整声明·通话流归voice不送车机］"
+            text += " · 100 telephony(0x70000150/0x70000150)［完整声明］"
         }
         return text + " · 100 speechRecognition(0x20000040/0x20000040)"
             + " · 101 default(0x40008800/0) · 102 media(AAC 0xc00000/0)"
