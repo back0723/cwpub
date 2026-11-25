@@ -282,7 +282,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     override func viewDidLoad() {
         super.viewDidLoad()
         applyCarLifeFactoryPresetIfNeeded()
-        title = "YCarWith"
+        title = "Carplay"
         // 声音输出不持久化：每次启动都从「随画面传输」开始。
         selectedSoundOutput = .browser
         // 「车机蓝牙」选项已删除：走不走蓝牙交给 iPhone 系统路由，不再强制 allowBluetoothA2DP。
@@ -302,7 +302,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let savedName = UserDefaults.standard.string(forKey: "receiverName")
         // Earlier default names follow the rename; a name the user typed is kept.
         let legacyDefaults: Set<String> = ["TDS Car Kit", "CarPlays", "CarWithin"]
-        nameField.text = savedName.map { legacyDefaults.contains($0) ? "YCarWith" : $0 } ?? "YCarWith"
+        nameField.text = savedName.map { legacyDefaults.contains($0) ? "Carplay" : $0 } ?? "Carplay"
         ipField.text = ReceiverConfiguration.localIPv4Addresses().first
         let selectedPreset = WiFiPresetStore.selected()
         ssidField.text = selectedPreset?.ssid ?? UserDefaults.standard.string(forKey: "wifiSSID")
@@ -624,7 +624,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         receiver.onCarUIRequested = { [weak self] in
             guard let self else { return }
-            self.log("在 CarPlay 中点按了 YCarWith 车辆按钮")
+            self.log("在 CarPlay 中点按了 Carplay 车辆按钮")
             self.hideFullscreen(); self.revealSettings()
         }
         receiver.onAirPlayReady = { [weak self] id in
@@ -1076,7 +1076,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         config.showTouches = showTouchesSwitch.isOn
         if carButtonSwitch.isOn {
             config.oemIconPNG = customVehicleIcon ?? Self.carButtonIcon
-            config.oemIconLabel = String((nameField.text ?? "").prefix(12)).isEmpty ? "YCarWith" : String((nameField.text ?? "").prefix(12))
+            config.oemIconLabel = String((nameField.text ?? "").prefix(12)).isEmpty ? "Carplay" : String((nameField.text ?? "").prefix(12))
         }
         let source = outputMode != .browser ? headUnitOutput.selectedTitle
             : followsCarScreen ? (screen.map { "车机屏幕 \($0.title)" } ?? "尚无车机屏幕，用固定分辨率") : "固定尺寸"
@@ -1479,7 +1479,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         if modeControl.selectedSegmentIndex == 1 {
             guard let identity else { return }
             guard let address = localCarPlayAddress else { waitForLocalNetwork(); return }
-            var config = ReceiverConfiguration(name: nameField.text ?? "YCarWith", address: address,
+            var config = ReceiverConfiguration(name: nameField.text ?? "Carplay", address: address,
                 ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: declaresAudio,
                 videoOutputPort: outputPort, secureVideoOutputPort: httpsPort,
                 deviceID: ReceiverConfiguration.persistentDeviceID())
@@ -1521,7 +1521,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         let addresses = ReceiverConfiguration.localIPv4Addresses()
         if !addresses.contains(ipField.text ?? "") { ipField.text = browserAddress ?? addresses.first }
-        var config = ReceiverConfiguration(name: nameField.text ?? "YCarWith", address: ipField.text ?? "",
+        var config = ReceiverConfiguration(name: nameField.text ?? "Carplay", address: ipField.text ?? "",
             ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: declaresAudio,
             videoOutputPort: outputPort, secureVideoOutputPort: httpsPort,
             deviceID: ReceiverConfiguration.persistentDeviceID())
@@ -1651,7 +1651,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private func startBrowserPage() {
         guard outputMode == .browser, videoOutputSwitch.isOn, !running, !waitingForNetwork else { return }
         guard let address = browserAddress, let port = browserPort, browserPortError == nil else { return }
-        var config = ReceiverConfiguration(name: nameField.text ?? "YCarWith", address: address,
+        var config = ReceiverConfiguration(name: nameField.text ?? "Carplay", address: address,
             ssid: ssidField.text ?? "", password: "", wifiChannel: 36, audioEnabled: false,
             videoOutputPort: port, secureVideoOutputPort: secureBrowserPort,
             deviceID: ReceiverConfiguration.persistentDeviceID())
@@ -1710,7 +1710,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             : local ? "无需外接盒子，直接在这台 iPhone 上启动并显示 CarPlay。" : "接收另一台 iPhone 的导航、音乐和触控画面。"
         connectionHelp.text = remote
             ? "让 iPhone 和 iPad 连接同一个 Wi-Fi。"
-            : local ? "先在系统设置连接 Wi-Fi，再在 YCarWith 选择对应预设。"
+            : local ? "先在系统设置连接 Wi-Fi，再在 Carplay 选择对应预设。"
             : "先启动此接收屏，再从另一台 iPhone 发起连接。"
         refreshNetworkSummary()
         refreshVideoOutputSummary()
@@ -1827,7 +1827,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         guard autoRestarts < 2 else { log("本次连接已自动重启 2 次，不再重启：\(reason)"); return }
         // Restarting off screen would drop the background keep-alive; wait until the app is back.
         guard UIApplication.shared.applicationState == .active else {
-            pendingRestartReason = reason; log("回到 YCarWith 后重启：\(reason)"); return
+            pendingRestartReason = reason; log("回到 Carplay 后重启：\(reason)"); return
         }
         restartCarPlay(reason: reason, forPerformance: true)
     }
@@ -2096,7 +2096,7 @@ extension ReceiverViewController {
     }
     @objc private func receiverNameChanged() {
         guard !running else { return }
-        UserDefaults.standard.set(nameField.text ?? "YCarWith", forKey: "receiverName")
+        UserDefaults.standard.set(nameField.text ?? "Carplay", forKey: "receiverName")
     }
 
     /// Shows settings and, when needed, takes the user to the relevant connection settings.
@@ -2125,7 +2125,7 @@ extension ReceiverViewController {
 
     fileprivate func settingsDismissed() {
         view.endEditing(true)
-        UserDefaults.standard.set(nameField.text ?? "YCarWith", forKey: "receiverName")
+        UserDefaults.standard.set(nameField.text ?? "Carplay", forKey: "receiverName")
         saveHeadUnitOutput()
         refreshNetworkSummary(); refreshVideoOutputSummary(); updateVideoAspect()
         updatePictureInPicturePolicy()
@@ -2158,7 +2158,7 @@ extension ReceiverViewController {
                     .guide("让 iPhone 加入 Wi-Fi，或直接开个人热点", icon: ("wifi", .systemBlue),
                            "路由器、车机 Wi-Fi 或另一台手机的热点都可以，也可以干脆用这台 iPhone 自己开个人热点：车机连上这个热点后，用首页显示的 172.20.10.x 地址访问即可。"),
                     .guide("选择同名预设", icon: ("list.bullet", .systemBlue),
-                           "回到 YCarWith，在「Wi-Fi 预设」选择刚连的网络。第一次用，在「Wi-Fi 与网络」添加。热点模式下没有可加入的网络名，留空也能启动。")
+                           "回到 Carplay，在「Wi-Fi 预设」选择刚连的网络。第一次用，在「Wi-Fi 与网络」添加。热点模式下没有可加入的网络名，留空也能启动。")
                 ]),
                 SettingsSection("2. 选一种输出", [
                     .guide("浏览器", icon: ("globe", .systemTeal),
@@ -2303,7 +2303,7 @@ extension ReceiverViewController {
                     .control("驾驶位", icon: ("steeringwheel", .systemTeal), driveControl),
                     .page("车辆", icon: ("car.fill", .systemTeal)) { [unowned self] in self.vehiclePage() }
                 ]),
-                SettingsSection("后台与画中画", footer: "锁屏前，请在 iPhone「设置 › 通用 › CarPlay › YCarWith」中打开「锁定时允许 CarPlay」。后台运行会增加耗电。画中画仅显示实时画面。离开 App 时自动开启需打开 iPhone「设置 › 通用 › 画中画」中的自动选项。", [
+                SettingsSection("后台与画中画", footer: "锁屏前，请在 iPhone「设置 › 通用 › CarPlay › Carplay」中打开「锁定时允许 CarPlay」。后台运行会增加耗电。画中画仅显示实时画面。离开 App 时自动开启需打开 iPhone「设置 › 通用 › 画中画」中的自动选项。", [
                     .control("锁屏与后台继续运行", icon: ("lock.fill", .systemPurple), keepAliveSwitch),
                     .control("画中画开启时机", icon: ("pip.fill", .systemIndigo), pictureInPictureTiming)
                 ]),
@@ -2358,7 +2358,7 @@ extension ReceiverViewController {
             let plan = planDisplay(for: targetScreen)
             return [
                 SettingsSection(footer: (followsCarScreen
-                    ? "启动时先用勾选的屏幕或最近一次设置。第一个网页接管后，窗口尺寸变化会在 YCarWith 回到前台时应用。更大的窗口按最高分辨率等比缩小。"
+                    ? "启动时先用勾选的屏幕或最近一次设置。第一个网页接管后，窗口尺寸变化会在 Carplay 回到前台时应用。更大的窗口按最高分辨率等比缩小。"
                     : "选择比例后按分辨率档位计算尺寸，短边至少 320 像素，实际值见下方。2K/4K 会增加发热和带宽。")
                     + (!followsCarScreen && outputMode != .browser ? "\n此输出受 1920×1080 限制，较长的竖屏比例以实际尺寸为准。" : "")
                     + "\n下次启动：\(plan.width)×\(plan.height) · \(plan.fps) FPS · \(plan.codec.displayName)", size),
@@ -2448,7 +2448,7 @@ extension ReceiverViewController {
             var sections: [SettingsSection] = []
             if modeControl.selectedSegmentIndex != 2 {
                 sections.append(SettingsSection(footer: "车辆名称显示在 iPhone 的 CarPlay 车辆列表中。", [
-                    .field("车辆名称", nameField, placeholder: "YCarWith")
+                    .field("车辆名称", nameField, placeholder: "Carplay")
                 ]))
             }
             var button: [SettingsRow] = [.control("显示车辆按钮", icon: ("car.side.fill", .systemTeal), carButtonSwitch)]
