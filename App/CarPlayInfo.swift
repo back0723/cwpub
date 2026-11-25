@@ -28,11 +28,10 @@ enum CarPlayInfo {
 
     /// 固定开启：通话不接管。
     /// 兼容档必须声明 telephony，iPhone 才会把媒体音频图建起来（音乐才有声）；但同一份声明也会
-    /// 让 iOS 把通话音频塞进 CarPlay，而配件没有麦克风，结果双方都听不到。
-    /// 这里做两件事：① telephony 只声明输出、不声明输入（等于告诉 iOS「这台配件播得出来、录不了」），
-    /// ② SETUP 里直接回 415 拒接纯通话音频流。
+    /// 让 iOS 把通话音频流开到 CarPlay 这边。这里不再回 415 拒接（实测 iOS 收到 415 会拆掉整个
+    /// 会话导致车机画面卡死），而是照常建立通话流，靠下游把它归为 .voice：不送车机、不碰本机
+    /// 音频路由、不起麦克风，通话声音自然留在车机蓝牙 HFP 或 iPhone 本身，CarPlay 只管画面与媒体。
     /// 电话键仍然保留，让 CarPlay 当第二屏能点拨打/接听（按键只是上报给 iPhone，由 iPhone 执行通话）。
-    /// 这样 iOS 判定通话音频这条路走不通，通话声音自然留在车机蓝牙 HFP 或 iPhone 本身，CarPlay 只负责画面与媒体。
     /// 已按要求移除设置开关、避免误操作，因此这里恒为 true。
     static var callFreeCarPlay: Bool { true }
     /// 当前这套声明是不是"通话不接管"模式（只有兼容档打开时才有意义）。
@@ -69,7 +68,7 @@ enum CarPlayInfo {
         ]
         // 保留电话键：CarPlay 当 iPhone 的第二屏，来电能在车机点接听、平时能点拨打。
         // 接听/拨打动作只是 HID 按键上报给 iPhone，由 iPhone 真正执行通话；
-        // 通话音频不进 CarPlay——telephony 只声明输出(输入 0) + SETUP 对纯通话流回 415，
+        // 通话音频流照常建立，但归为 .voice 后不送车机、不碰本机音频路由，
         // 通话声音留在车机蓝牙 HFP 或手机本身，不占车机音乐通道。
         hidDevices.append(hidDevice(HID.telephony, name: "CarWithin 电话键", descriptor: telephonyDescriptor))
         var info: [String: Any] = ["sourceVersion": "509.11", "features": NSNumber(value: features(audio: config.audioEnabled)), "statusFlags": 4,
@@ -112,8 +111,9 @@ enum CarPlayInfo {
             // 必须把通话音频通道按"输入/输出都非零"完整声明（和唯一实测能出声的 build39 一致）：
             // iOS 只有在 telephony 带非零输入格式时才会建立整个 CarPlay 音频图，媒体流 102 才会发出、
             // 音乐和导航才从车机出声。之前"输入写 0"骗 iOS 没麦克风的做法，实测连音频图都不建、全程没声。
-            // 通话不因此进车机：由 SETUP 对纯通话流回 415 + 通话帧丢弃 + 电话键只上报 iPhone 保证，
-            // 所以这里可以放心用完整声明换出声，通话仍走车机蓝牙 HFP 或手机。
+            // 通话不因此进车机：通话流照常建立后被归为 .voice —— 不送车机、不碰本机音频路由、不起麦克风，
+            // 声音留在车机蓝牙 HFP 或手机；电话键只上报 iPhone。注意绝不能回 415 拒接通话流，
+            // 实测 iOS 收到 415 会拆掉整个 CarPlay 会话、导致车机画面卡死。
             if audioFormatsCompat {
                 types.insert((100, "telephony"), at: 5)
                 profiles.insert((100, "telephony", 0x70000150, 0x70000150), at: 5)
@@ -137,7 +137,7 @@ enum CarPlayInfo {
         var text = "100 compatibility(0x8854/0x54) · 101 compatibility(0x8800/0) · 100 default(0x30000050/0x30000050)"
             + " · 100 media(0x8800/0) · 100 alert(0x40008800/0)"
         if audioFormatsCompat {
-            text += " · 100 telephony(0x70000150/0x70000150)［完整声明·通话由415隔离］"
+            text += " · 100 telephony(0x70000150/0x70000150)［完整声明·通话流归voice不送车机］"
         }
         return text + " · 100 speechRecognition(0x20000040/0x20000040)"
             + " · 101 default(0x40008800/0) · 102 media(AAC 0xc00000/0)"
