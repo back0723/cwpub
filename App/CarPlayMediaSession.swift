@@ -66,6 +66,8 @@ final class CarPlayMediaSession {
     var onAudioPCM: ((CarLifeAudioFrame) -> Void)?
     /// 车机页面上有没有人在要声音；没人要时音频留给本机播放（CarLife 模式就是这种情况）。
     var browserAudioWanted: (() -> Bool)?
+    /// 是否允许本机播放（「由 iPhone 输出」）。为 false 时，未转发到接收端就保持静默。
+    var localAudioWanted: (() -> Bool)?
     var onVideo: ((Data, VideoCodec) -> Void)?
     init(queue: DispatchQueue, secret: SymmetricKey, peerAddress: String, audioEnabled: Bool, hevc: Bool) {
         self.queue = queue; self.secret = secret; self.peerAddress = peerAddress
@@ -97,15 +99,16 @@ final class CarPlayMediaSession {
                     let audioType = (stream["audioType"] as? String ?? "").lowercased()
                     let streamType = type.intValue
                     let route = CarLifeAudioRoute.classify(streamType: streamType, audioType: audioType)
-                    let requestsMicrophone = streamType == 100 && ["telephony", "speechrecognition", "default"].contains(audioType)
-                        && ((stream["input"] as? Bool) == true || (stream["dataPort"] as? NSNumber)?.intValue ?? 0 > 0)
-                    let microphonePort = requestsMicrophone ? (stream["dataPort"] as? NSNumber).flatMap { UInt16(exactly: $0.intValue) }.flatMap { $0 > 0 ? $0 : nil } : nil
+                    // CarPlay 已不再声明任何输入方向（telephony / speechRecognition / default 全部清零），
+                    // 也彻底不用 Siri：这里永远不申请麦克风端口，避免任何流把 AVAudioSession 拽走。
+                    let microphonePort: UInt16? = nil
                     audio.removeValue(forKey: streamType)?.stop()
                     // 通话流（telephony / speechrecognition）标记 isVoice：CarPlayAudio 据此在本机绝不抢
                     // AVAudioSession 路由，微信/电话才能继续用自己的蓝牙/听筒，双方都听得到。
                     let isVoice = route == .voice
                     let output = try CarPlayAudio(secret: secret, peerAddress: peerAddress,
-                        connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort, isVoice: isVoice)
+                        connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort,
+                        isVoice: isVoice, isNavigation: route == .navigation)
                     output.onLog = { [weak self] in self?.onLog?($0) }
                     // 所有流（含通话）统一遵循 browserAudioWanted：
                     // · CarLife 模式恒 true → 走 onBrowserAudio 转发后直接 return，不落本机
@@ -114,6 +117,7 @@ final class CarPlayMediaSession {
                     // · 通话对方声音已由 onAudioPCM → 车机通道3 播出（音乐/导航此刻暂停独占）。
                     // · 麦克风启动在 receive() 里独立于播放分支，不受此开关影响。
                     output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
+                    output.shouldPlayLocally = { [weak self] in self?.localAudioWanted?() ?? true }
                     // 导航/通话只交给车机对应通道，本机 AVAudioEngine 不再重复播放，避免车机与手机双份声音。
                     output.onPCM = { [weak self] buffer in
                         let frame = CarLifeAudioFrame(buffer: buffer, streamType: streamType, audioType: audioType, route: route)
@@ -232,10 +236,8 @@ final class CarPlayMediaSession {
         _ = sendHID(uuid, release, label: "按键")
     }
     func requestSiri() {
-        guard sendCommand(["type": "requestSiri", "params": ["siriAction": 2]], label: "Siri") else {
-            onLog?("Siri 未发送：事件通道尚未连接"); return
-        }
-        _ = sendCommand(["type": "requestSiri", "params": ["siriAction": 3]], label: "Siri")
+        // CarPlay 彻底不使用 Siri：不再向 iPhone 发 requestSiri，避免拉起语音识别流、抢音频会话。
+        onLog?("已忽略 Siri 请求（CarPlay 不启用 Siri）")
     }
     /// Latest wanted day/night state; kept until the event channel can carry it.
     private var pendingNightMode: Bool?
