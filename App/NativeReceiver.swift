@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import AVFoundation
 
 /// All listener/session state is confined to queue. UI callbacks are always main-thread.
 final class NativeReceiver {
@@ -165,6 +166,8 @@ final class NativeReceiver {
             // 浏览器接收页常驻（CarMode 的做法）：车机网页在会话启动前就能打开、上报尺寸、
             // 并由页面上的"开始投屏"按钮发起会话，所以这里不能顺手把页面服务一起停掉。
             self.stopOnQueue(keepingBrowser: self.browserRunning)
+            CarPlayAudio.outputMuted = false
+            self.installCallMuteObserver()
             self.wireBrowserOutput()
             self.displaySize = (configuration.width, configuration.height)
             if let target = configuration.zeehoAddress {
@@ -361,6 +364,63 @@ final class NativeReceiver {
         DispatchQueue.main.async { [weak self] in self?.onFailure?() }
     }
     /// 只停 CarPlay 会话，浏览器接收页继续常驻（车机那边会退回"开始投屏"）。
+    /// 通话静音观察者：电话 / 微信语音 / FaceTime 触发 AVAudioSession 中断。
+    private var callMuteObserver: NSObjectProtocol?
+    private var callTimer: Timer?
+    private var wasPlayingBeforeCall = false
+    private var callMutedAt = Date.distantPast
+    private func installCallMuteObserver() {
+        guard callMuteObserver == nil else { return }
+        callMuteObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw), let self else { return }
+            self.queue.async {
+                if type == .began { self.beginCallOnQueue() } else { self.endCallOnQueue() }
+            }
+        }
+        // 兜底：中断结束通知偶尔不到（微信语音常见），30 秒后确认真没在占用就自行收尾。
+        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self, CarPlayAudio.outputMuted else { return }
+            self.queue.async {
+                guard CarPlayAudio.outputMuted else { return }
+                if Date().timeIntervalSince(self.callMutedAt) > 30,
+                   !AVAudioSession.sharedInstance().isOtherAudioPlaying {
+                    self.endCallOnQueue()
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        callTimer = timer
+    }
+
+    private func beginCallOnQueue() {
+        CarPlayAudio.outputMuted = true
+        callMutedAt = Date()
+        wasPlayingBeforeCall = assumedPlaying
+        guard wasPlayingBeforeCall, let media = activeMedia else {
+            log("通话开始：车机静音（音乐本来没在播）")
+            return
+        }
+        // 与原生 CarPlay 一致：通话占音频焦点时停止音乐，通话结束再补一次播放。
+        media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.pause.rawValue]), release: Data([0]))
+        assumedPlaying = false
+        log("通话开始：已暂停音乐，通话结束自动续播")
+    }
+
+    private func endCallOnQueue() {
+        CarPlayAudio.outputMuted = false
+        guard wasPlayingBeforeCall, let media = activeMedia else {
+            wasPlayingBeforeCall = false
+            return
+        }
+        // 补一次明确的播放键（不是 playPause 切换），避免把用户的暂停状态翻过来。
+        media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.play.rawValue]), release: Data([0]))
+        assumedPlaying = true
+        wasPlayingBeforeCall = false
+        log("通话结束：已恢复音乐播放")
+    }
+
     func stop() { queue.async { [weak self] in self?.stopOnQueue(keepingBrowser: true) } }
     /// 连同浏览器接收页一起关掉（关应用、切换输出方式时用）。
     func stopAll() { queue.async { [weak self] in self?.stopOnQueue() } }
@@ -505,8 +565,20 @@ final class NativeReceiver {
         (try? AnnexB.units(in: accessUnit))?.contains { codec.isRandomAccess($0) } ?? false
     }
     private func stopOnQueue(keepingBrowser: Bool = false) {
+        if let observer = callMuteObserver {
+            NotificationCenter.default.removeObserver(observer); callMuteObserver = nil
+        }
+        callTimer?.invalidate(); callTimer = nil
+        wasPlayingBeforeCall = false
+        CarPlayAudio.outputMuted = false
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
         voiceReleaseWork?.cancel(); voiceReleaseWork = nil; carLife.setCallActive(false)
+        // 退出 CarPlay：把 iPhone 上的音乐按成「暂停」——发明确的暂停键（不是 playPause 切换），
+        // 避免本来就在暂停的音乐被切回播放。CarPlay 拔掉后声音回不到车机，就该静下来。
+        if let media = activeMedia {
+            media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.pause.rawValue]), release: Data([0]))
+            assumedPlaying = false
+        }
         generation = UUID(); listener?.cancel(); listener = nil
         if !keepingBrowser { videoOutput.stop(); browserRunning = false }
         carLife.stop()
@@ -612,8 +684,9 @@ final class NativeReceiver {
                         // 万一 iOS 仍推来通话流，直接丢弃，车机按蓝牙 HFP 出声。
                         return
                     }
-                    guard carLifeOn, carLifeAudioOn, self.carLife.isReadyForAudio else {
-                        if !self.loggedCarLifeAudioBlocked {
+                    // 有非通话音频流在跑，说明音乐确实在播放；用于通话前暂停、通话后续播的判断。
+                    if !CarPlayAudio.outputMuted { self.assumedPlaying = true }
+                    guard carLifeOn, carLifeAudioOn, self.carLife.isReadyForAudio else {                        if !self.loggedCarLifeAudioBlocked {
                             self.loggedCarLifeAudioBlocked = true
                             self.log("CarLife 伴音：音频没送去车机（CarLife 模式=\(carLifeOn ? "开" : "关")，“随画面传输”=\(carLifeAudioOn ? "开" : "关")，车机未连上）")
                         }
