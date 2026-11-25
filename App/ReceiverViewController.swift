@@ -641,7 +641,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         pictureInPicture.onFailure = { [weak self] in
             guard let self, self.running else { return }
             if UIApplication.shared.applicationState == .background {
-                if !self.keepAlive.isRunning { self.stop() }
+                // 画中画起不来也不能就此结束会话：再拉一次后台保持，实在不行也不主动停。
+                if !self.keepAlive.isRunning { _ = self.keepAlive.start() }
             } else {
                 self.statusLabel.text = "画中画未开启，可点「画中画」重试"
             }
@@ -649,7 +650,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         pictureInPicture.onStopped = { [weak self] in
             guard let self, self.running else { return }
             if UIApplication.shared.applicationState == .background {
-                if !self.keepAlive.isRunning { self.stop() }
+                if !self.keepAlive.isRunning { _ = self.keepAlive.start() }
             } else {
                 self.resumeLocalVideo()
             }
@@ -1886,14 +1887,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         updateCheckTask?.cancel()
         receiverBrowser.stop()
         guard running else { return }
-        // willResignActive may have failed to start it (e.g. the session was busy); try once more
-        // before deciding the session cannot survive in the background.
-        if keepAliveSwitch.isOn, !keepAlive.isRunning, keepAlive.start() { log("后台保持在进入后台时重试成功") }
-        if canRunInBackground {
-            log(keepAlive.isRunning ? "App 已进入后台，CarPlay 继续运行" : "App 已进入后台，由画中画保持运行")
+        // 用户要求：除非手动点停止，进入后台绝不主动结束 CarPlay / CarLife。
+        // 后台保持没跑起来就再拉一次（通话、切换 App 都可能把它停掉）。
+        if keepAliveSwitch.isOn, !keepAlive.isRunning { _ = keepAlive.start() }
+        if keepAlive.isRunning {
+            log("App 已进入后台，CarPlay 继续运行")
+        } else if canRunInBackground {
+            log("App 已进入后台，由画中画保持运行")
         } else {
-            log("App 已进入后台且没有画中画或后台保持，iOS 会挂起 App，已停止 CarPlay")
-            stop()
+            log("App 已进入后台，后台保持未能启动；不主动停止 CarPlay，交给系统处理")
         }
     }
     @objc private func copyLog() { UIPasteboard.general.string = lines.joined(separator: "\n") }
