@@ -38,7 +38,7 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>YCarWith 仅使用定位权限读取当前 Wi-Fi 名称，不会收集位置坐标。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>YCarWith 需要使用麦克风，将 Siri 和通话语音传回 iPhone。</string>
+	<string>YCarWith 用于画面投屏与音频播放，不采集麦克风（通话与 Siri 均不在 CarPlay 上承载）。</string>
 	<key>TDSWiFiNameDetection</key>
 	<string>$(TDS_WIFI_NAME_DETECTION)</string>
 	<key>UIApplicationSceneManifest</key>
