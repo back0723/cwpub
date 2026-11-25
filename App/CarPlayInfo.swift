@@ -26,6 +26,18 @@ enum CarPlayInfo {
         UserDefaults.standard.object(forKey: "audioFormatsCompat") as? Bool ?? false
     }
 
+    /// 设置 → CarPlay → 声音 里的第二个开关：通话不接管（默认开）。
+    /// 兼容档必须声明 telephony，iPhone 才会把媒体音频图建起来（音乐才有声）；但同一份声明也会
+    /// 让 iOS 把通话音频塞进 CarPlay，而配件没有麦克风，结果双方都听不到。
+    /// 打开这个开关后做两件事：① telephony 只声明输出、不声明输入（等于告诉 iOS「这台配件播得出来、录不了」），
+    /// ② /info 里去掉 HID 电话键；同时 SETUP 里直接回 415 拒接通话音频流。
+    /// 这样 iOS 判定通话这条路走不通，通话自然留在车机蓝牙 HFP 或 iPhone 本身，CarPlay 只负责画面与媒体。
+    static var callFreeCarPlay: Bool {
+        UserDefaults.standard.object(forKey: "callFreeCarPlay") as? Bool ?? true
+    }
+    /// 当前这套声明是不是"通话不接管"模式（只有兼容档打开时才有意义）。
+    static var callFreeActive: Bool { audioFormatsCompat && callFreeCarPlay }
+
     /// 30–60 in steps of 5 (round half up), as the iPhone expects for maxFPS.
     static func sanitizedFPS(_ fps: Int) -> Int {
         let clamped = min(60, max(30, fps))
@@ -50,12 +62,16 @@ enum CarPlayInfo {
         if config.audioEnabled { var audio = resource; audio["resourceID"] = 2; resources.append(audio) }
         let modes: [String: Any] = ["resources": resources, "appStates": [
             ["appStateID": 2, "state": false], ["appStateID": 1, "speechMode": -1], ["appStateID": 3, "state": false]]]
-        let hidDevices = [
+        var hidDevices = [
             hidDevice(HID.touch, name: "CarWithin 触控屏", descriptor: touchDescriptor(width: config.width, height: config.height)),
             hidDevice(HID.knob, name: "CarWithin 旋钮", descriptor: knobDescriptor),
-            hidDevice(HID.media, name: "CarWithin 多媒体键", descriptor: mediaDescriptor),
-            hidDevice(HID.telephony, name: "CarWithin 电话键", descriptor: telephonyDescriptor)
+            hidDevice(HID.media, name: "CarWithin 多媒体键", descriptor: mediaDescriptor)
         ]
+        // 通话不接管模式下不声明电话键：没有通话音频通道却摆一排电话键，iOS 会把通话 UI 拉进 CarPlay，
+        // 一按就是双方没声。去掉后 CarPlay 里没有电话入口，通话留在蓝牙/手机。
+        if !(config.audioEnabled && callFreeActive) {
+            hidDevices.append(hidDevice(HID.telephony, name: "CarWithin 电话键", descriptor: telephonyDescriptor))
+        }
         var info: [String: Any] = ["sourceVersion": "509.11", "features": NSNumber(value: features(audio: config.audioEnabled)), "statusFlags": 4,
             "model": "CarWithin1,1", "manufacturer": "CarWithin", "deviceID": config.deviceID,
             "bluetoothIDs": [config.deviceID], "name": config.name, "rightHandDrive": config.rightHandDrive,
@@ -94,9 +110,11 @@ enum CarPlayInfo {
                 // 音频格式 无」），音乐全留在手机扬声器上，所以声明必须回到 AAC（0xc00000）。
                 (102, "media", 0xc00000, 0)]
             // 排查开关打开时，把通话音频通道加回声明，完整还原历史那份 /info。
+            // 通话不接管模式（默认）下这条只声明输出、输入写 0：iOS 据此知道配件没有麦克风，
+            // 通话仍能留在车机蓝牙/iPhone，而媒体音频图不受影响（音乐照样出声）。
             if audioFormatsCompat {
                 types.insert((100, "telephony"), at: 5)
-                profiles.insert((100, "telephony", 0x70000150, 0x70000150), at: 5)
+                profiles.insert((100, "telephony", 0x70000150, callFreeCarPlay ? 0 : 0x70000150), at: 5)
             }
             info["audioFormats"] = profiles.map { type, audioType, output, input -> [String: Any] in
                 var entry: [String: Any] = ["type": type, "audioType": audioType, "audioOutputFormats": output]
@@ -116,7 +134,11 @@ enum CarPlayInfo {
         guard audio else { return "音频未声明" }
         var text = "100 compatibility(0x8854/0x54) · 101 compatibility(0x8800/0) · 100 default(0x30000050/0x30000050)"
             + " · 100 media(0x8800/0) · 100 alert(0x40008800/0)"
-        if audioFormatsCompat { text += " · 100 telephony(0x70000150/0x70000150)［兼容模式］" }
+        if audioFormatsCompat {
+            text += callFreeCarPlay
+                ? " · 100 telephony(0x70000150/0)［兼容模式·通话不接管］"
+                : " · 100 telephony(0x70000150/0x70000150)［兼容模式］"
+        }
         return text + " · 100 speechRecognition(0x20000040/0x20000040)"
             + " · 101 default(0x40008800/0) · 102 media(AAC 0xc00000/0)"
     }
