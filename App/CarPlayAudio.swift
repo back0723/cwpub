@@ -168,11 +168,9 @@ final class CarPlayAudio {
                 return
             }
             onPCM?(buffer)
-            // 【对方听不到根因】通话流(isVoice)在 CarLife 模式下 shouldForwardAudio 恒 true，
-            // 会在下面 onBrowserAudio 分支直接 return，永远走不到旧代码里"本机播放分支"的
-            // microphone.start() —— 上行麦克风从未启动，对方自然听不到。
-            // 这里把麦克风启动独立出来：只要通话流真的收到对方声音，就启动上行采集，
-            // 与本机是否播放、是否转发网页无关。只启动一次。
+            // 【上行交给手机系统通话】本方案 microphonePort 恒 nil，microphone 永远不会创建，
+            // 下面的启动块是历史兼容代码（若未来改回车机采麦可复用），当前不会执行。
+            // 车机不再采麦、不碰 AVAudioSession；用手机本机麦克风走系统通话即可双向。
             if let microphone, isVoice, !microphoneStarted {
                 microphoneStarted = true
                 microphone.onLog = onLog
@@ -576,7 +574,11 @@ final class NativeAudioDecoder {
 /// On-demand mono PCM/Opus capture for a negotiated voice uplink. All state is main-thread.
 /// Music streams never request microphone permission or activate recording.
 private final class NativeMicrophone {
-    private let engine = AVAudioEngine()
+    // 必须用 var：engine 要在「会话类别已确定为可录」之后重建。
+    // 若在 App 启动（会话还是 .playback）时创建，切到 .playAndRecord 后 inputNode 缓存的
+    // 硬件格式不会刷新，outputFormat(forBus:0) 仍返回 sampleRate=0 → build2 真机日志
+    // 「数据格式错误：麦克风格式」、三次重试全失败的根因。
+    private var engine = AVAudioEngine()
     private let packetizer: MicrophonePacketizer
     private let connection: NWConnection
     private let rate: Int
@@ -667,7 +669,18 @@ private final class NativeMicrophone {
                 }
             }
             if format.isOpus { opusEncoder = try NativeOpusEncoder(rate: rate) }
-            let input = engine.inputNode.outputFormat(forBus: 0)
+            // 【build2 失败根因修复】必须在会话切到可录"之后"重建 engine 并 prepare，
+            // 否则 inputNode 还缓存着 playback 类别下的旧格式，sampleRate=0 → 抛「麦克风格式」，
+            // 且三次重试都复用同一个坏 engine，注定全失败。重建后 inputNode 会读取当前硬件格式。
+            engine = AVAudioEngine()
+            try engine.prepare()
+            var input = engine.inputNode.outputFormat(forBus: 0)
+            // 兜底：个别机型/时序下 prepare 后采样率仍可能为 0，用硬件实际采样率重建一个合法格式。
+            if input.sampleRate <= 0 || input.channelCount <= 0,
+               let fallback = AVAudioFormat(standardFormatWithSampleRate: session.sampleRate > 0 ? session.sampleRate : 48000,
+                                            channels: max(1, session.inputNumberOfChannels)) {
+                input = fallback
+            }
             guard input.sampleRate > 0, input.channelCount > 0,
                   let output = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1),
                   let converter = AVAudioConverter(from: input, to: output) else { throw ProtocolError.malformed("麦克风格式") }
