@@ -46,6 +46,9 @@ final class CarLifeOutput {
     private var navAudioReceived = 0
     private var timer: DispatchSourceTimer?
 
+    /// 车机 CarLife 客户端是否已连上并完成认证（通道 3 才有地方收音频）。
+    /// 没连上就不要传音，交给本机播放，避免声音白丢。
+    var isReadyForAudio: Bool { session?.authenticated ?? false }
     var onLog: ((String) -> Void)?
     var onState: ((String) -> Void)?
     /// Every finger the head unit holds, normalized 0…1; an empty list releases them.
@@ -867,7 +870,9 @@ private final class Session {
     private var lastVoiceReport = DispatchTime(uptimeNanoseconds: 0)
     private var lastVoicePlayAt = DispatchTime(uptimeNanoseconds: 0)
     private var voiceFrames = 0
-    /// 导航播报期间把音乐压到正常音量的 70%（App 侧缩放 PCM，不依赖车机 setVolume）。
+    /// 导航播报期间把音乐压到正常音量的一半（App 侧缩放 PCM，不依赖车机 setVolume）。
+    /// 设置页「导航播报时音乐降低 50%」控制该开关，默认开启。
+    static var navigationDuckingEnabled = true
     private var duckMusicUntil = DispatchTime(uptimeNanoseconds: 0)
     private var loggedDucking = false
 
@@ -889,13 +894,13 @@ private final class Session {
         // iPhone 停止音乐后 CarPlay 仍持续推静音帧，若照单全收，车机 AudioTrack 会被 tick() 的
         // 定期 play 不断唤醒、重播残留缓冲 → 停播后还一直响。连续静音 1.2 秒就发一次 pause。
         let nowNs = DispatchTime.now().uptimeNanoseconds
-        // 导航播报时把音乐压到 70%：App 侧直接缩放 PCM16，车机无需支持 setVolume。
-        let ducking = nowNs < duckMusicUntil.uptimeNanoseconds
+        // 导航播报时把音乐压到 50%：App 侧直接缩放 PCM16，车机无需支持 setVolume。
+        let ducking = Self.navigationDuckingEnabled && nowNs < duckMusicUntil.uptimeNanoseconds
         guard var pcm = Self.pcm16(buffer) else { return }
-        if ducking { Self.scalePCM16(&pcm, 0.7) }
+        if ducking { Self.scalePCM16(&pcm, 0.5) }
         if ducking && !loggedDucking {
             loggedDucking = true
-            log?("CarLife 伴音：导航播报中，音乐音量压低到 70%")
+            log?("CarLife 伴音：导航播报中，音乐音量压低到 50%")
         }
         if !ducking { loggedDucking = false }
         let peak = Self.peakPCM16(pcm)
@@ -1034,7 +1039,7 @@ private final class Session {
         } else {
             ttsSilentSince = nil
         }
-        // 导航播报有声：接下来 1.5 秒把音乐压到 70%（连续播报每帧都会续期）。
+        // 导航播报有声：接下来 1.5 秒把音乐压到 50%（连续播报每帧都会续期）。
         duckMusicUntil = DispatchTime(uptimeNanoseconds: nowNs + 1_500_000_000)
         guard let link = ttsLink else {
             if !loggedNoTTSChannel {
@@ -1284,7 +1289,7 @@ private final class Session {
         case 79, 85: .playPause
         case 87: .next
         case 88: .previous
-        case 219, 231: .siri
+        // 219(ASSIST) / 231(VOICE_ASSIST) 不再映射为 Siri：CarPlay 彻底不使用 Siri。
         default: nil
         }
     }
