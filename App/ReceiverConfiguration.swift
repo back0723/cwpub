@@ -128,11 +128,58 @@ struct ReceiverConfiguration {
         return result
     }
 
-    /// 能与 CarPlay 接上的本机地址。个人热点模式下 iPhone 的 Wi-Fi 射频处于 AP 模式，
-    /// 它自己连 172.20.10.1 是连不通的（日志里就是一直「会话正在等待 TCP 连接」），
-    /// 只能用本机回环地址，CarPlay 会话本来就在这台手机上。
-    var carPlayTargetAddress: String {
-        ReceiverConfiguration.hotspotIPv4Address() == address ? "127.0.0.1" : address
+    /// CarPlay 会话请求要用的目标：地址 + 是否带 Wi‑Fi 组。
+    struct CarPlaySessionPlan {
+        let address: String
+        let wifi: Bool
+        let note: String
+    }
+
+    /// CarPlay 会话请求的目标顺序。
+    ///
+    /// 路由器 Wi‑Fi：局域网地址，先带 Wi‑Fi 组，再退成仅地址（和以前一样）。
+    /// iPhone 个人热点：iPhone 的 Wi‑Fi 射频是 AP 模式，旧版在热点下只试过 127.0.0.1，
+    /// 日志里 iOS 连 TCP 都没发起。现在先试热点桥地址（172.20.10.1，iOS 的网络栈能从这个
+    /// 地址路由回本机）；设置里填了热点名称/密码时再带一次 Wi‑Fi 组；最后才退回环地址。
+    /// 每一次请求都会打印在日志里，哪一条接上了就能看出来。
+    var carPlaySessionPlans: [CarPlaySessionPlan] {
+        let hotspot = ReceiverConfiguration.hotspotIPv4Address()
+        let hotSpotMode = ReceiverConfiguration.personalHotspotActive
+            && (address == hotspot || ReceiverConfiguration.wifiIPv4Address() == nil)
+        guard hotSpotMode, let hotspot else {
+            return [CarPlaySessionPlan(address: address, wifi: true, note: "局域网地址 + Wi‑Fi 组"),
+                    CarPlaySessionPlan(address: address, wifi: false, note: "局域网地址")]
+        }
+        var plans: [CarPlaySessionPlan] = [CarPlaySessionPlan(address: hotspot, wifi: false, note: "热点桥地址")]
+        if !ssid.isEmpty {
+            plans.append(CarPlaySessionPlan(address: hotspot, wifi: true, note: "热点桥地址 + Wi‑Fi 组“\(ssid)”"))
+        }
+        plans.append(CarPlaySessionPlan(address: "127.0.0.1", wifi: false, note: "本机回环（旧版做法）"))
+        return plans
+    }
+
+    /// 日志用：当前所有 IPv4 接口（名字、地址、标志位），热点模式下能一眼看出 en0 / bridge 的区别。
+    static func interfaceSummary() -> String {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0 else { return "无法读取网络接口" }
+        defer { freeifaddrs(first) }
+        var parts: [String] = []
+        var current = first
+        while let entry = current {
+            defer { current = entry.pointee.ifa_next }
+            let name = String(cString: entry.pointee.ifa_name)
+            guard let addr = entry.pointee.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count),
+                              nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let flags = entry.pointee.ifa_flags
+            var tags = [String]()
+            if flags & UInt32(IFF_UP) != 0 { tags.append("UP") }
+            if flags & UInt32(IFF_RUNNING) != 0 { tags.append("RUN") }
+            if flags & UInt32(IFF_LOOPBACK) != 0 { tags.append("LOOP") }
+            parts.append("\(name)=\(String(cString: host))/\(tags.joined(separator: "|"))")
+        }
+        return parts.isEmpty ? "没有 IPv4 接口" : parts.joined(separator: "，")
     }
 
     static func persistentDeviceID() -> String {

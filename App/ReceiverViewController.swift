@@ -1266,10 +1266,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
     private func refreshNetworkSummary() {
         let name = ssidField.text ?? ""
-        // 1.0.1 的提示：车机连 iPhone 热点也能直接投屏，不必先有路由器 Wi-Fi。
+        // 1.0.1 的提示：车机连 iPhone 热点也能直接投屏，不必先有路由器 Wi‑Fi。
+        // 热点模式下 CarPlay 会话也要在这个热点里建连，所以「Wi‑Fi 名称/密码」要填热点自己的名字和密码。
         if ReceiverConfiguration.personalHotspotActive {
             networkSummary.text = name.isEmpty
-                ? "已检测到个人热点，请先在设置中保存 Wi-Fi 配置"
+                ? "已检测到个人热点：请把热点名称和无线局域网密码填到「Wi‑Fi 名称 / 密码」"
                 : "已检测到个人热点，CarPlay 配置就绪"
         } else if needsNetworkDetails, !name.isEmpty {
             networkSummary.text = "CarPlay Wi-Fi 预设：\(name)"
@@ -1521,7 +1522,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         guard let identity else { return }
         if let hotspot = ReceiverConfiguration.hotspotIPv4Address() {
-            log("已检测到个人热点 \(hotspot)：车机加入这个热点后，用 http://\(hotspot):\(browserPort ?? 9888) 访问")
+            log("已检测到个人热点 \(hotspot)：车机加入这个热点后，用 http://\(hotspot):\(browserPort ?? 9888) 访问；CarPlay 会话也走这个热点地址建连")
         }
         let addresses = ReceiverConfiguration.localIPv4Addresses()
         if !addresses.contains(ipField.text ?? "") { ipField.text = browserAddress ?? addresses.first }

@@ -32,7 +32,9 @@ final class SameDeviceProbe {
             // Use transport type 2 for a Wi-Fi accessory connection.
             try transport.start(withIdentifier: configuration.deviceID, transportType: 2)
             stage("已创建本机配件端点（传输类型 2），正在建立 iAP2")
-            onLog?("CarPlay 启动参数：\(configuration.address):\(configuration.port)，Wi-Fi 组 SSID \(configuration.ssid.isEmpty ? "（空）" : "“\(configuration.ssid)”")")
+            onLog?("CarPlay 启动参数：\(configuration.address):\(configuration.port)，Wi‑Fi 组 SSID \(configuration.ssid.isEmpty ? "（空）" : "“\(configuration.ssid)”")")
+            onLog?("网络接口：\(ReceiverConfiguration.interfaceSummary())")
+            onLog?("CarPlay 目标顺序：\(configuration.carPlaySessionPlans.map { "\($0.address)\($0.wifi ? "＋Wi‑Fi组" : "")" }.joined(separator: " → "))")
             try transport.send(IAP2Packet.presence)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 guard let self, self.active, self.generation == run else { return }
@@ -48,7 +50,7 @@ final class SameDeviceProbe {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self] in
                 guard let self, self.active, self.generation == run, self.expectsLocalControl, !self.controlConnected else { return }
-                self.finish("未收到 CarPlay 控制连接，请检查 Wi-Fi 名称和密码后重试。兼容信道通常可保持默认值。")
+                self.finish(self.controlTimeoutHint())
             }
         } catch { finish("本机传输失败：\(error.localizedDescription)") }
     }
@@ -67,22 +69,24 @@ final class SameDeviceProbe {
         controlConnected = false
         requested = false
     }
-    private func requestSession(_ configuration: ReceiverConfiguration, wireless: Bool = true) throws {
-        // iOS 16 sometimes refuses the Wi-Fi group (wrong SSID/channel makes it try to switch
-        // networks and drop the request). Same-device installs are already on the LAN, so the
-        // plain address form is tried as well.
-        // 个人热点模式下目标地址换成 127.0.0.1：自己的 Wi-Fi 在 AP 模式，连 172.20.10.1 连不通；
-        // 这种模式下也不再带 Wi-Fi 组，否则 iOS 会尝试“切网”到自己的热点。
-        let target = configuration.carPlayTargetAddress
-        let loopback = target != configuration.address
-        let wifi = (wireless && !loopback)
+    private func requestSession(_ configuration: ReceiverConfiguration, plan: ReceiverConfiguration.CarPlaySessionPlan) throws {
+        let wifi = plan.wifi
             ? try AccessoryMessages.WiFi(ssid: configuration.ssid, password: configuration.password, channel: configuration.wifiChannel)
             : nil
-        try send(AccessoryMessages.startSession(address: target, port: configuration.port,
+        try send(AccessoryMessages.startSession(address: plan.address, port: configuration.port,
             deviceID: configuration.deviceID, wifi: wifi))
-        stage("已请求在 \(target):\(configuration.port) 启动 CarPlay（\(wifi != nil ? "含 Wi-Fi 参数" : (loopback ? "个人热点模式，本机回环" : "仅地址") )），会话正在等待 TCP 连接")
+        stage("已请求在 \(plan.address):\(configuration.port) 启动 CarPlay（\(plan.note)\(wifi == nil ? "，仅地址" : "，含 Wi‑Fi 参数")），会话正在等待 TCP 连接")
     }
     private func stage(_ message: String) { onLog?(message); onStage?(message) }
+    /// 45 秒仍没有控制连接时，把已经试过的地方说清楚，并给出下一步能直接做的事。
+    private func controlTimeoutHint() -> String {
+        guard ReceiverConfiguration.personalHotspotActive, let hotspot = ReceiverConfiguration.hotspotIPv4Address() else {
+            return "未收到 CarPlay 控制连接，请检查 Wi-Fi 名称和密码后重试。兼容信道通常可保持默认值。"
+        }
+        return "未收到 CarPlay 控制连接：热点桥地址 \(hotspot) 和回环 127.0.0.1 都试过，iOS 没有发起 TCP。"
+            + "请把这台 iPhone 个人热点的名称和无线局域网密码填到「Wi‑Fi 名称 / 密码」后重试；"
+            + "若仍不连，就让 iPhone 加入车机自己的 Wi‑Fi（车机热点 / CarLife 的 WLAN 直连），CarPlay 与 CarLife 走同一个网络。"
+    }
     private func finish(_ message: String) { onLog?(message); stop(); onFinished?(message) }
     private func ack() throws {
         try transport.send(IAP2Packet(control: 0x40, sequence: sequence, acknowledgement: acknowledgement, session: 0).encoded())
@@ -156,23 +160,27 @@ final class SameDeviceProbe {
                 }
             }
             if controlConnected || (!expectsLocalControl && requested) { return }
-            // The Wi-Fi group is what iOS 16 honours (the address-only form alone did not connect
-            // on a real unit), so send it first and keep the plain form as the retry.
-            try requestSession(configuration, wireless: true)
-            if !requested && expectsLocalControl {
-                let run = generation
-                let plans: [(Double, Bool)] = [(3.0, false), (6.0, true), (9.0, false)]
-                for (delay, wireless) in plans {
+            // 按 ReceiverConfiguration 排好的目标顺序依次请求：路由器下是局域网地址；
+            // 个人热点下先热点桥地址（仅地址），再热点桥地址 + Wi‑Fi 组，最后回环。
+            let sessionPlans = configuration.carPlaySessionPlans
+            guard let firstPlan = sessionPlans.first else { finish("没有可用的 CarPlay 目标地址"); return }
+            do { try requestSession(configuration, plan: firstPlan) }
+            catch { finish("会话请求失败：\(error.localizedDescription)"); return }
+            requested = true
+            let run = generation
+            if expectsLocalControl {
+                let delays: [Double] = [2.5, 5.0, 9.0]
+                for (index, delay) in delays.enumerated() where index + 1 < sessionPlans.count {
+                    let plan = sessionPlans[index + 1]
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                         guard let self, self.active, self.generation == run, !self.controlConnected else { return }
-                        do { try self.requestSession(configuration, wireless: wireless) }
-                        catch { self.finish("会话重试失败：\(error)") }
+                        do { try self.requestSession(configuration, plan: plan) }
+                        catch { self.finish("会话重试失败：\(error.localizedDescription)") }
                     }
                 }
             }
-            requested = true
             stage(expectsLocalControl
-                ? "已请求在 \(configuration.address):\(configuration.port) 启动 CarPlay，会话正在等待 TCP 连接"
+                ? "CarPlay 会话已请求（\(firstPlan.address):\(configuration.port)），正在等待 iOS 发起 TCP 连接"
                 : "已向 \(configuration.name)（\(configuration.address):\(configuration.port)）请求 CarPlay。请保持此 App 运行并查看 iPad 画面。")
         default: onLog?(String(format: "未处理的配件消息 0x%04X", message.id))
         }
