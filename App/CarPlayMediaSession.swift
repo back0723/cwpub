@@ -12,14 +12,14 @@ import AVFoundation
 enum CarLifeAudioRoute: String {
     case music       // 音乐：通道 3
     case navigation  // 导航播报/系统提示音：通道 4（TTS）
-    case voice       // 电话/微信语音：不送车机，交给 iPhone 本机蓝牙/听筒
+    case voice       // 电话/微信语音：对方声音送车机通道3（音乐/导航暂停），你的声音由麦克风上行回 iPhone
 
     /// 以 CarPlay 给出的 audioType 为准，stream type 作辅助。
     /// 102(media) 一定是音乐；telephony/speechRecognition 一定是通话；
     /// alert/navigation 是导航播报；其余(default/101) 保守当音乐，保证一定有声音。
     static func classify(streamType: Int, audioType: String) -> CarLifeAudioRoute {
         let kind = audioType.lowercased()
-        // 电话 / 语音识别 → 交给 iPhone 本机（微信/电话的蓝牙或听筒），绝不送车机。
+        // 电话 / 语音识别 → 归为 .voice：对方声音送车机通道3、你的声音由麦克风上行回 iPhone。
         if ["telephony", "speechrecognition"].contains(kind) { return .voice }
         if streamType == 100 { return .voice }
         // 导航播报 / 系统提示 / 语音助手 → 车机独立 TTS 通道 4。
@@ -62,7 +62,7 @@ final class CarPlayMediaSession {
     private var videoPackets = 0
     var onLog: ((String) -> Void)?
     var onBrowserAudio: ((Int, AVAudioPCMBuffer, UInt64) -> Void)?
-    /// 每一路解码后的 PCM 及其分类，用来喂 CarLife 车机端的音乐/导航通道；通话不送车机。
+    /// 每一路解码后的 PCM 及其分类，用来喂 CarLife 车机端的音乐/导航/通话通道。
     var onAudioPCM: ((CarLifeAudioFrame) -> Void)?
     /// 车机页面上有没有人在要声音；没人要时音频留给本机播放（CarLife 模式就是这种情况）。
     var browserAudioWanted: (() -> Bool)?
@@ -100,12 +100,18 @@ final class CarPlayMediaSession {
                     let streamType = type.intValue
                     let route = CarLifeAudioRoute.classify(streamType: streamType, audioType: audioType)
                     CarPlayMediaSession.recordAudioSetup(type: streamType, audioType: audioType)
-                    // CarPlay 已不再声明任何输入方向（telephony / speechRecognition / default 全部清零），
-                    // 也彻底不用 Siri：这里永远不申请麦克风端口，避免任何流把 AVAudioSession 拽走。
-                    let microphonePort: UInt16? = nil
+                    // 所有音频与通话走 CarPlay：telephony/speechRecognition/default 流若带输入方向，
+                    // 用 iPhone 给的 dataPort 作为麦克风上行端口，把你的声音采集后送回 iPhone。
+                    // 音乐/导航流不带输入，microphonePort 为 nil，不申请麦克风、不动 AVAudioSession。
+                    let requestsMicrophone = streamType == 100
+                        && ["telephony", "speechrecognition", "default"].contains(audioType)
+                        && ((stream["input"] as? Bool) == true || (stream["dataPort"] as? NSNumber)?.intValue ?? 0 > 0)
+                    let microphonePort = requestsMicrophone
+                        ? (stream["dataPort"] as? NSNumber).flatMap { UInt16(exactly: $0.intValue) }.flatMap { $0 > 0 ? $0 : nil }
+                        : nil
                     audio.removeValue(forKey: streamType)?.stop()
                     // 通话流（telephony / speechrecognition）标记 isVoice：CarPlayAudio 据此在本机绝不抢
-                    // AVAudioSession 路由，微信/电话才能继续用自己的蓝牙/听筒，双方都听得到。
+                    // AVAudioSession 路由（抢了会顶断通话）；对方声音走车机通道3、你的声音由麦克风上行。
                     let isVoice = route == .voice
                     let output = try CarPlayAudio(secret: secret, peerAddress: peerAddress,
                         connectionID: connectionID.uint64Value, format: format, microphonePort: microphonePort,
