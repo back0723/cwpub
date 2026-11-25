@@ -113,6 +113,12 @@ final class CarPlayAudio {
     /// 通话期间接管端静音：车机/网页一律收到同格式的静音帧（不是停流、不是暂停），
     /// iPhone 上的音乐继续走自己的进度，不做任何 pause 下发。
     static var outputMuted = false
+    /// 上次收到非静音 PCM 的时刻，用于「通话结束后音乐是否真的回来了」的自检。
+    static var lastAudibleAt = DispatchTime(uptimeNanoseconds: 0)
+    /// 静音帧的残余幅度：万分之一（约 -80 dB）。取「极小但非零」而不是 0：
+    /// 非零能同时绕过「幅度阈值静音检测」和「连续 0 判录音结束」，又低到任何功放都听不见，
+    /// 不会触发车机 AGC/底噪放大。float 转 16-bit 后约 3 LSB，仍是非零数据。
+    static let callMuteGain: Float = 0.0001
     init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil, isVoice: Bool = false, isNavigation: Bool = false) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format; self.isVoice = isVoice
         self.isNavigation = isNavigation
@@ -145,11 +151,12 @@ final class CarPlayAudio {
             // 导航播报压低音乐：导航流有声音就续期 1.5 秒；音乐流在窗口内把 PCM 缩放到 50%。
             // 缩放发生在 onPCM / 浏览器转发 / 本机播放之前，三条出口音量一致。
             if isNavigation { Self.noteNavigation(buffer) }
+            if !isVoice, !Self.outputMuted { Self.lastAudibleAt = DispatchTime.now() }
             // 通话期间：所有送到接收端（车机 CarLife / 网页）的声音一律静音。
             // 送的是同格式静音帧，通道与格式都不变，车机 AudioTrack 继续跑，恢复后不会重建；
             // 也绝不向 iPhone 发暂停键——音乐只静音，不暂停，CarPlay 会话照常。
             if Self.outputMuted, !isVoice {
-                let silent = Self.duckedCopy(buffer, 0)
+                let silent = Self.duckedCopy(buffer, Self.callMuteGain)
                 onPCM?(silent)
                 if let onBrowserAudio, shouldForwardAudio?() ?? true {
                     onBrowserAudio(silent, browserTimestamp(packet.timestamp, arrival: arrival))
