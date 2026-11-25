@@ -110,6 +110,9 @@ final class CarPlayAudio {
     static var navigationActiveUntil = DispatchTime(uptimeNanoseconds: 0)
     /// 设置「导航播报时音乐降低 50%」的开关，默认开启。
     static var duckMusicForNavigation = true
+    /// 通话期间接管端静音：车机/网页一律收到同格式的静音帧（不是停流、不是暂停），
+    /// iPhone 上的音乐继续走自己的进度，不做任何 pause 下发。
+    static var outputMuted = false
     init(secret: SymmetricKey, peerAddress: String, connectionID: UInt64, format: ReceiverAudioFormat, microphonePort: UInt16? = nil, isVoice: Bool = false, isNavigation: Bool = false) throws {
         self.queue = Self.renderQueue; self.connectionID = connectionID; self.format = format; self.isVoice = isVoice
         self.isNavigation = isNavigation
@@ -142,6 +145,17 @@ final class CarPlayAudio {
             // 导航播报压低音乐：导航流有声音就续期 1.5 秒；音乐流在窗口内把 PCM 缩放到 50%。
             // 缩放发生在 onPCM / 浏览器转发 / 本机播放之前，三条出口音量一致。
             if isNavigation { Self.noteNavigation(buffer) }
+            // 通话期间：所有送到接收端（车机 CarLife / 网页）的声音一律静音。
+            // 送的是同格式静音帧，通道与格式都不变，车机 AudioTrack 继续跑，恢复后不会重建；
+            // 也绝不向 iPhone 发暂停键——音乐只静音，不暂停，CarPlay 会话照常。
+            if Self.outputMuted, !isVoice {
+                let silent = Self.duckedCopy(buffer, 0)
+                onPCM?(silent)
+                if let onBrowserAudio, shouldForwardAudio?() ?? true {
+                    onBrowserAudio(silent, browserTimestamp(packet.timestamp, arrival: arrival))
+                }
+                return
+            }
             onPCM?(buffer)
             // 【对方听不到根因】通话流(isVoice)在 CarLife 模式下 shouldForwardAudio 恒 true，
             // 会在下面 onBrowserAudio 分支直接 return，永远走不到旧代码里"本机播放分支"的
