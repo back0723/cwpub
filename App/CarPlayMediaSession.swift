@@ -100,15 +100,13 @@ final class CarPlayMediaSession {
                     let streamType = type.intValue
                     let route = CarLifeAudioRoute.classify(streamType: streamType, audioType: audioType)
                     CarPlayMediaSession.recordAudioSetup(type: streamType, audioType: audioType)
-                    // 所有音频与通话走 CarPlay：telephony/speechRecognition/default 流若带输入方向，
-                    // 用 iPhone 给的 dataPort 作为麦克风上行端口，把你的声音采集后送回 iPhone。
-                    // 音乐/导航流不带输入，microphonePort 为 nil，不申请麦克风、不动 AVAudioSession。
-                    let requestsMicrophone = streamType == 100
-                        && ["telephony", "speechrecognition", "default"].contains(audioType)
-                        && ((stream["input"] as? Bool) == true || (stream["dataPort"] as? NSNumber)?.intValue ?? 0 > 0)
-                    let microphonePort = requestsMicrophone
-                        ? (stream["dataPort"] as? NSNumber).flatMap { UInt16(exactly: $0.intValue) }.flatMap { $0 > 0 ? $0 : nil }
-                        : nil
+                    // 【模仿官方 CarLife：上行交给手机系统通话】车机端不再采集麦克风。
+                    // 官方百度 CarLife 连接车机打电话时是在手机上执行通话、用手机麦克风，车机只投屏
+                    // + 放对方声音。我方旧逻辑只要流带 dataPort 就建 NativeMicrophone 抢上行，与手机
+                    // 系统通话冲突、且采的是运行 App 那台设备的麦（不是人对着说话的手机）→ 对方听不到。
+                    // 现在 microphonePort 恒 nil：不申请麦克风、不建采集、不动 AVAudioSession，
+                    // 通话上行完全留给 iPhone 本机；对方声音仍经本流→车机通道3播出（下行不变）。
+                    let microphonePort: UInt16? = nil
                     audio.removeValue(forKey: streamType)?.stop()
                     // 通话流（telephony / speechrecognition）标记 isVoice：CarPlayAudio 据此在本机绝不抢
                     // AVAudioSession 路由（抢了会顶断通话）；对方声音走车机通道3、你的声音由麦克风上行。
@@ -122,7 +120,7 @@ final class CarPlayMediaSession {
                     //   AVAudioEngine 播放分支。那个分支在 CarAudio 路由下会 setCategory(.playAndRecord)
                     //   + overrideOutputAudioPort(.speaker)，正是顶断微信、双方听不到的元凶。
                     // · 通话对方声音已由 onAudioPCM → 车机通道3 播出（音乐/导航此刻暂停独占）。
-                    // · 麦克风启动在 receive() 里独立于播放分支，不受此开关影响。
+                    // · 本方案上行交给 iPhone 系统通话：车机不采麦，无需再启动上行麦克风。
                     output.shouldForwardAudio = { [weak self] in self?.browserAudioWanted?() ?? true }
                     output.shouldPlayLocally = { [weak self] in self?.localAudioWanted?() ?? true }
                     // 导航/通话只交给车机对应通道，本机 AVAudioEngine 不再重复播放，避免车机与手机双份声音。
