@@ -99,6 +99,7 @@ final class CarPlayMediaSession {
                     let audioType = (stream["audioType"] as? String ?? "").lowercased()
                     let streamType = type.intValue
                     let route = CarLifeAudioRoute.classify(streamType: streamType, audioType: audioType)
+                    CarPlayMediaSession.recordAudioSetup(type: streamType, audioType: audioType)
                     // CarPlay 已不再声明任何输入方向（telephony / speechRecognition / default 全部清零），
                     // 也彻底不用 Siri：这里永远不申请麦克风端口，避免任何流把 AVAudioSession 拽走。
                     let microphonePort: UInt16? = nil
@@ -229,6 +230,18 @@ final class CarPlayMediaSession {
     /// Full multitouch state: every slot is reported each time; missing slots report up.
     func touch(_ contacts: [CarPlayInfo.TouchContact]) {
         _ = sendHID(CarPlayInfo.HID.touch, CarPlayInfo.touchReport(contacts), label: "触控")
+    }
+    /// 已建立的音频流记录（type/audioType），用于启动自检与日志对照。
+    private static let setupLock = NSLock()
+    private static var setupStore: [String] = []
+    static var audioSetups: [String] {
+        setupLock.lock(); defer { setupLock.unlock() }
+        return setupStore
+    }
+    static func recordAudioSetup(type: Int, audioType: String) {
+        setupLock.lock()
+        setupStore.append("\(type)/\(audioType.isEmpty ? "-" : audioType)")
+        setupLock.unlock()
     }
     /// Momentary HID key: the press report followed by the all-released report.
     func pressHID(_ uuid: String, _ report: Data, release: Data) {
