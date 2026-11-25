@@ -53,7 +53,7 @@ enum CarPlayInfo {
             "model": "CarWithin1,1", "manufacturer": "CarWithin", "deviceID": config.deviceID,
             "bluetoothIDs": [config.deviceID], "name": config.name, "rightHandDrive": config.rightHandDrive,
             "keepAliveLowPower": false, "keepAliveSendStatsAsBody": false, "modes": modes,
-            "extendedFeatures": ["vocoderInfo", "enhancedRequestCarUI"],
+            "extendedFeatures": ["enhancedRequestCarUI"],
             "displays": [display], "hidDevices": hidDevices]
         if config.videoCodec == .h265 { info["hevcInfo"] = [String: Any]() }
         if let icon = config.oemIconPNG, let size = vehicleButtonSize(in: config) {
@@ -63,18 +63,19 @@ enum CarPlayInfo {
             info["oemIcons"] = [["imageData": icon, "widthPixels": size, "heightPixels": size, "prerendered": true] as [String: Any]]
         }
         if config.audioEnabled {
-            // Wireless CarPlay requires a compressed codec for every interactive
-            // voice/alternate category, even when only music is currently playing.
+            // 通话(Siri)故意不声明 telephony / speechRecognition：
+            // 一旦声明，iOS 就把通话与 Siri 塞进 CarPlay 并要求配件供麦；本机录音又被
+            // Playback 会话锁死（OSStatus '!int'），结果对方听不到、微信被顶掉。
+            // 实测车机蓝牙 HFP 双向可用，去掉后通话留在蓝牙，Siri 只留在 iPhone 自身，
+            // CarPlay 只做屏幕与媒体。default 的输入方向也清零，彻底不供麦。
             let types: [(Int, String)] = [(100,"compatibility"),(101,"compatibility"),(100,"default"),
-                (100,"media"),(100,"alert"),(100,"telephony"),(100,"speechRecognition"),(101,"default")]
+                (100,"media"),(100,"alert"),(101,"default")]
             let profiles: [(Int, String, Int, Int)] = [
                 (100, "compatibility", 0x8854, 0x54),
                 (101, "compatibility", 0x8800, 0),
-                (100, "default", 0x30000050, 0x30000050),
+                (100, "default", 0x30000050, 0),
                 (100, "media", 0x8800, 0),
                 (100, "alert", 0x40008800, 0),
-                (100, "telephony", 0x70000150, 0x70000150),
-                (100, "speechRecognition", 0x20000040, 0x20000040),
                 (101, "default", 0x40008800, 0),
                 // type 102 是无线 CarPlay 的媒体音频通道，不能省：去掉它 iPhone 会直接不发媒体音频。
                 // v5.26 试过只声明 PCM(0x8800)，iPhone 连 102 的 SETUP 都不发（日志里只剩「已请求媒体流 110，
