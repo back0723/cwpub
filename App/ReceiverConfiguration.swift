@@ -99,6 +99,14 @@ struct ReceiverConfiguration {
 
     static var personalHotspotActive: Bool { hotspotIPv4Address() != nil }
 
+    /// 车机在个人热点网段里的地址（172.20.10.2…254）。热点桥 .1 是 iPhone 自己，排除。
+    static func isCarPeerAddress(_ address: String) -> Bool {
+        guard address.hasPrefix("172.20.10.") else { return false }
+        if address == hotspotIPv4Address() { return false }
+        guard let last = address.split(separator: ".").last, let value = Int(last) else { return false }
+        return value >= 2 && value <= 254
+    }
+
     /// 能用上的局域网地址：优先路由器 Wi-Fi，其次个人热点。
     static func lanIPv4Address() -> String? {
         wifiIPv4Address() ?? hotspotIPv4Address()

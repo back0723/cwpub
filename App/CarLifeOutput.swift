@@ -23,6 +23,17 @@ final class CarLifeOutput {
     private let queue = DispatchQueue(label: "CarWithin.carlife", qos: .userInitiated)
     private var listeners: [NWListener] = []
     private var session: Session?
+    /// 车机在个人热点里的实时地址（CarLife 控制连接的对端）。热点模式下 CarPlay 会话
+    /// 要请求到这个地址，由车机端「热点中继」把它转到本机 7000；DHCP 换了它就跟着换。
+    private let peerLock = NSLock()
+    private var storedPeer: String?
+    var currentPeer: String? {
+        peerLock.lock(); defer { peerLock.unlock() }
+        return storedPeer
+    }
+    private func setPeer(_ value: String?) {
+        peerLock.lock(); storedPeer = value; peerLock.unlock()
+    }
     private var generation = UUID()
     private var running = false
     private var targetAddress: String?
@@ -153,6 +164,7 @@ final class CarLifeOutput {
             session?.close(reason: "控制连接被替换")
             parameters = VideoParameterSets(codec: .h264)
             session = makeSession(peer: peer)
+            setPeer(peer)
         }
         guard let session else { connection.cancel(); return }
         session.attach(link)
@@ -320,6 +332,7 @@ final class CarLifeOutput {
         timer?.cancel(); timer = nil
         listeners.forEach { $0.cancel() }; listeners.removeAll()
         session?.close(reason: "CarPlay 已停止"); session = nil
+        setPeer(nil)
         parameters = VideoParameterSets(codec: .h264); warnedCodec = false
         if discoverySocket >= 0 { close(discoverySocket); discoverySocket = -1 }
         discoveryErrorLogged = false

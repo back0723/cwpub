@@ -62,6 +62,8 @@ final class NativeReceiver {
     private var airPlayIdentity: AirPlayCredentials?
     private let videoOutput = VideoOutputServer()
     private let carLife = CarLifeOutput()
+    /// 车机在个人热点里的实时地址（CarLife 控制连接的对端），热点模式下当 CarPlay 会话目标。
+    var carPeerAddress: String? { carLife.currentPeer }
     /// 从最近一个 IDR 到当前的全部帧。iPhone 只在会话开始送一个关键帧，之后 forceKeyFrame
     /// 会被 iOS 16 回 408；车机连进来时把这段缓存按顺序回放，就能从第一帧起连续解码。
     private var carLifeGOP: [Data] = []

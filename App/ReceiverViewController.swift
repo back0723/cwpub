@@ -563,6 +563,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         receiver.onLog = { [weak self] in self?.log($0) }; bluetooth.onLog = { [weak self] in self?.log($0) }
         receiver.onControlConnected = { [weak self] in self?.sameDevice.didConnectControl() }
         receiver.onControlDisconnected = { [weak self] in self?.sameDevice.didDisconnectControl() }
+        // 热点模式下 CarPlay 会话要请求到车机地址：来源是 CarLife 控制连接的对端。
+        sameDevice.carPeerProvider = { [weak self] in self?.receiver.carPeerAddress }
         receiver.onVideo = { [weak self] data, codec in
             guard let self, self.running else { return }
             // Nothing local is visible in the background without PiP: save the decoding work.

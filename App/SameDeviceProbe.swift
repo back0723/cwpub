@@ -19,6 +19,9 @@ final class SameDeviceProbe {
     private var requested = false
     private var controlConnected = false
     private var expectsLocalControl = true
+    /// 热点模式下取车机地址（CarLife 控制连接的对端，或车机中继广播），为空表示还不知道。
+    var carPeerProvider: (() -> String?)?
+    private var hotspotDeadline: Date?
     var onLog: ((String) -> Void)?
     var onFinished: ((String) -> Void)?
     var onStage: ((String) -> Void)?
@@ -58,6 +61,7 @@ final class SameDeviceProbe {
         active = false; generation = UUID(); transport.stop(); transport.onData = nil; parser = IAP2Parser()
         identity = nil; configuration = nil; messageBytes = Data(); sequence = 0x10; acknowledgement = 0
         session = 1; lastPayloadSequence = nil; linked = false; authenticated = false; identified = false; requested = false; controlConnected = false
+        hotspotDeadline = nil
     }
     func didConnectControl() {
         guard active else { return }
@@ -78,14 +82,85 @@ final class SameDeviceProbe {
         stage("已请求在 \(plan.address):\(configuration.port) 启动 CarPlay（\(plan.note)\(wifi == nil ? "，仅地址" : "，含 Wi‑Fi 参数")），会话正在等待 TCP 连接")
     }
     private func stage(_ message: String) { onLog?(message); onStage?(message) }
+
+    // MARK: 个人热点：先等车机地址，再请求会话
+
+    /// 车机在 172.20.10.0/28 里的地址（不是 iPhone 自己的桥地址）。
+    private func hotspotCarPeer() -> String? {
+        guard let raw = carPeerProvider?() else { return nil }
+        let peer = raw.trimmingCharacters(in: .whitespaces)
+        return ReceiverConfiguration.isCarPeerAddress(peer) ? peer : nil
+    }
+
+    private func beginHotspotSession(_ configuration: ReceiverConfiguration) {
+        hotspotDeadline = Date().addingTimeInterval(15)
+        onLog?("CarPlay：热点模式，正在等车机地址（车机端「热点中继」就绪即可）")
+        attemptHotspotSession(configuration)
+    }
+
+    private func attemptHotspotSession(_ configuration: ReceiverConfiguration) {
+        guard active, !controlConnected, !requested, let deadline = hotspotDeadline else { return }
+        if let car = hotspotCarPeer() {
+            hotspotDeadline = nil
+            requested = true
+            let plan = ReceiverConfiguration.CarPlaySessionPlan(address: car, wifi: false, note: "车机地址（热点中继）")
+            do { try requestSession(configuration, plan: plan) }
+            catch { finish("会话请求失败：\(error.localizedDescription)"); return }
+            stage("CarPlay 会话已请求（\(car):\(configuration.port) 车机地址），正在等待 iOS 经中继发起 TCP 连接")
+            let run = generation
+            // 车机端中继可能比这里晚几秒：同一目标再请求两次；地址变了就用新的。
+            for delay in [6.0, 12.0] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.active, self.generation == run, !self.controlConnected else { return }
+                    let target = self.hotspotCarPeer() ?? car
+                    do { try self.requestSession(configuration, plan: ReceiverConfiguration.CarPlaySessionPlan(
+                        address: target, wifi: false, note: "车机地址（热点中继重试）")) } catch { }
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 18) { [weak self] in
+                guard let self, self.active, self.generation == run, !self.controlConnected else { return }
+                self.onLog?("车机地址这条路 18 秒没有回连，再按原顺序试一次")
+                self.retryLegacyPlans(configuration)
+            }
+            return
+        }
+        if Date() < deadline {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.attemptHotspotSession(configuration)
+            }
+        } else {
+            hotspotDeadline = nil
+            onLog?("热点模式 15 秒内没拿到车机地址（车机没连 CarLife，或「热点中继」没开），先按原顺序试一次")
+            retryLegacyPlans(configuration)
+        }
+    }
+
+    private func retryLegacyPlans(_ configuration: ReceiverConfiguration) {
+        let plans = configuration.carPlaySessionPlans
+        guard let first = plans.first else { finish("没有可用的 CarPlay 目标地址"); return }
+        do { try requestSession(configuration, plan: first) }
+        catch { finish("会话请求失败：\(error.localizedDescription)"); return }
+        requested = true
+        let run = generation
+        let delays: [Double] = [2.5, 5.0, 9.0]
+        for (index, delay) in delays.enumerated() where index + 1 < plans.count {
+            let plan = plans[index + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.active, self.generation == run, !self.controlConnected else { return }
+                do { try self.requestSession(configuration, plan: plan) }
+                catch { self.finish("会话重试失败：\(error.localizedDescription)") }
+            }
+        }
+        stage("CarPlay 会话已请求（\(first.address):\(configuration.port)），正在等待 iOS 发起 TCP 连接")
+    }
     /// 45 秒仍没有控制连接时，把已经试过的地方说清楚，并给出下一步能直接做的事。
     private func controlTimeoutHint() -> String {
         guard ReceiverConfiguration.personalHotspotActive, let hotspot = ReceiverConfiguration.hotspotIPv4Address() else {
             return "未收到 CarPlay 控制连接，请检查 Wi-Fi 名称和密码后重试。兼容信道通常可保持默认值。"
         }
-        return "未收到 CarPlay 控制连接：热点桥地址 \(hotspot) 和回环 127.0.0.1 都试过，iOS 没有发起 TCP。"
-            + "请把这台 iPhone 个人热点的名称和无线局域网密码填到「Wi‑Fi 名称 / 密码」后重试；"
-            + "若仍不连，就让 iPhone 加入车机自己的 Wi‑Fi（车机热点 / CarLife 的 WLAN 直连），CarPlay 与 CarLife 走同一个网络。"
+        return "未收到 CarPlay 控制连接：车机地址、热点桥地址 \(hotspot) 和回环 127.0.0.1 都试过，iOS 没有发起 TCP。"
+            + "若日志里有「收到车机地址」但没有回连，说明 iOS 在热点（AP）模式下不启动无线 CarPlay；"
+            + "若连「等车机地址」都没出现，先在车机点开「热点中继」，确认它显示「监听中 0.0.0.0:7000」。"
     }
     private func finish(_ message: String) { onLog?(message); stop(); onFinished?(message) }
     private func ack() throws {
@@ -160,6 +235,12 @@ final class SameDeviceProbe {
                 }
             }
             if controlConnected || (!expectsLocalControl && requested) { return }
+            // 个人热点里 iPhone 是 AP，iOS 不会拨本机桥地址；改请求车机地址，由车机端
+            // 「热点中继」把 7000 转回本机。车机地址从 CarLife 对端取，DHCP 变了自动跟。
+            if ReceiverConfiguration.personalHotspotActive, expectsLocalControl {
+                beginHotspotSession(configuration)
+                return
+            }
             // 按 ReceiverConfiguration 排好的目标顺序依次请求：路由器下是局域网地址；
             // 个人热点下先热点桥地址（仅地址），再热点桥地址 + Wi‑Fi 组，最后回环。
             let sessionPlans = configuration.carPlaySessionPlans
