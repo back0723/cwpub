@@ -36,35 +36,24 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             switch self {
             case .carWithin: return "声音由当前接收设备播放，例如 iPad 的扬声器。"
             case .phone: return "用 iPhone 当前的声音输出。想让车机出声，请先配对并选中车机蓝牙。"
-            case .browser: return "由接收画面的设备播放。画面自动播放后，若网页提示「开启声音」，点一下即可。"
+            case .browser: return "声音随画面走 Wi‑Fi：CarLife 模式送到车机播放；车机浏览器模式由浏览器播放（页面提示「开启声音」时点一下）。"
             case .bluetooth: return "iPhone 先用蓝牙连上车机（车机蓝牙音乐），声音就从车机喇叭出。车机没开蓝牙音乐时会退回 iPhone 扬声器。"
             }
         }
     }
-    private var selectedSoundOutput: SoundOutput = {
-        let defaults = UserDefaults.standard
-        let receivesOnPad = UIDevice.current.userInterfaceIdiom == .pad
-        let legacy: SoundOutput = receivesOnPad && (defaults.object(forKey: "speakerAudio") as? Bool ?? true)
-            ? .carWithin : .phone
-        let saved = (defaults.object(forKey: "soundOutput") as? Int).flatMap(SoundOutput.init(rawValue:)) ?? legacy
-        if saved == .carWithin && !receivesOnPad {
-            defaults.set(SoundOutput.phone.rawValue, forKey: "soundOutput")
-            return .phone
-        }
-        return saved
-    }()
+    /// 声音输出不持久化：每次启动都默认「随画面传输（Wi‑Fi）」；
+    /// CarLife 模式可临时切到「由 iPhone 输出」，浏览器模式只有「随画面传输」。
+    private var selectedSoundOutput: SoundOutput = .browser
     private var receivesAudioFromAnotherDevice: Bool { modeControl.selectedSegmentIndex == 0 }
     private var soundOutput: SoundOutput {
-        // 车机蓝牙对哪种输出都可用：音频仍在本机解码，只是换个出声的地方。
-        if selectedSoundOutput == .bluetooth { return .bluetooth }
-        if outputMode == .carLife || outputMode == .airPlay || outputMode.usesInstrumentWiFi { return .phone }
-        if selectedSoundOutput == .carWithin && !receivesAudioFromAnotherDevice { return .phone }
-        if selectedSoundOutput == .browser && !videoOutputSwitch.isOn { return .phone }
-        return selectedSoundOutput
+        // 声音固定「随画面传输（Wi‑Fi）」，没有其它输出方式。
+        .browser
     }
     private let videoOutputSwitch = UISwitch()
     /// CarLife 模式：把解码后的 PCM 送进车机端的伴音通道（车机喇叭出声）。
     private let carLifeAudioSwitch = UISwitch()
+    /// 导航播报时把音乐压低 50% 的开关（设置 → CarPlay → 声音）。
+    private let navDuckingSwitch = UISwitch()
     /// 麦克风输入：true = iPhone 麦克风，false = 不占用手机麦克风（交给车机）。
     private var usesPhoneMicrophone: Bool = {
         let defaults = UserDefaults.standard
@@ -300,7 +289,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         super.viewDidLoad()
         applyCarLifeFactoryPresetIfNeeded()
         title = "YCarWith"
-        CarPlayAudio.preferBluetoothOutput = selectedSoundOutput == .bluetooth
+        // 声音输出不持久化：每次启动都从「随画面传输」开始。
+        selectedSoundOutput = .browser
+        // 「车机蓝牙」选项已删除：走不走蓝牙交给 iPhone 系统路由，不再强制 allowBluetoothA2DP。
+        CarPlayAudio.preferBluetoothOutput = false
         CarPlayAudio.capturesMicrophone = usesPhoneMicrophone
         navigationItem.largeTitleDisplayMode = .never
         view.backgroundColor = .systemGroupedBackground
@@ -920,7 +912,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         return button
     }
     /// The keys worth a button on a touch screen; knob up/down/select stay on keyboards.
-    private static let barControls: [CarPlayControl] = [.home, .back, .siri, .previous, .playPause, .next, .hookSwitch]
+    /// 不含 .siri：CarPlay 彻底不使用 Siri，不再给 Siri 任何入口。
+    private static let barControls: [CarPlayControl] = [.home, .back, .previous, .playPause, .next, .hookSwitch]
     @objc private func videoOutputSettingChanged() {
         guard !running else { return }
         refreshVideoOutputSummary()
@@ -1124,8 +1117,15 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
 
         }
         config.carLifeEnabled = outputMode == .carLife
-        config.carLifeAudio = carLifeAudioSwitch.isOn
-        log("CarLife 伴音：启动参数 伴音开关=\(carLifeAudioSwitch.isOn ? "开" : "关")，CarLife 模式=\(config.carLifeEnabled ? "开" : "关")，麦克风来源=\(usesPhoneMicrophone ? "iPhone" : "车机")")
+        // 「随画面传输」在两种模式下落到不同通道：
+        // · CarLife 模式 → CarLife 伴音通道（车机靠它出声）；
+        // · 车机浏览器模式 → 网页播放。
+        // 两种模式互斥，不会同时启用。
+        // 声音固定「随画面传输」：CarLife 模式走伴音通道，浏览器模式走网页；不再有本机输出。
+        config.carLifeAudio = config.carLifeEnabled
+        config.audioToBrowser = !config.carLifeEnabled
+        config.audioLocal = false
+        log("声音输出：\(soundOutput == .browser ? "随画面传输（Wi‑Fi）" : "由 iPhone 输出")，CarLife 模式=\(config.carLifeEnabled ? "开" : "关")，麦克风来源=\(usesPhoneMicrophone ? "iPhone" : "车机")")
         let carLifeAddress = (carLifeAddressField.text ?? "").trimmingCharacters(in: .whitespaces)
         config.carLifeAddress = !config.carLifeEnabled || carLifeAddress.isEmpty ? nil : carLifeAddress
     }
@@ -1966,9 +1966,9 @@ extension ReceiverViewController {
         defaults.set(HeadUnitOutput.carLife.rawValue, forKey: "headUnitOutputV2")
         defaults.set(true, forKey: "carLifeEnabled")
 
-        // 3) 声音默认车机：CarLife 模式下出声完全靠 carLifeAudio 开关（onAudioPCM→通道3→车机喇叭），
-        //    soundOutput 枚举在 CarLife 下恒为 .phone、不起作用，所以只需保证这个开关为开。
-        defaults.set(true, forKey: "carLifeAudio")
+        // 3) 声音默认「随画面传输」：CarLife 模式下走伴音通道（通道 3）由车机出声；
+        //    车机没音响时，再在声音页切回「由 iPhone 输出」。
+        defaults.set(SoundOutput.browser.rawValue, forKey: "soundOutput")
 
         // 4) 分辨率默认 1080P（resolutions 索引 2）
         defaults.set(2, forKey: "displayResolutionIndex")
@@ -2059,6 +2059,10 @@ extension ReceiverViewController {
         videoOutputSwitch.addTarget(self, action: #selector(videoOutputToggled), for: .valueChanged)
         carLifeAudioSwitch.isOn = defaults.object(forKey: "carLifeAudio") as? Bool ?? true
         carLifeAudioSwitch.addTarget(self, action: #selector(carLifeAudioToggled), for: .valueChanged)
+        navDuckingSwitch.isOn = defaults.object(forKey: "navDuckingMusic") as? Bool ?? true
+        navDuckingSwitch.addTarget(self, action: #selector(navDuckingToggled), for: .valueChanged)
+        CarLifeOutput.navigationDuckingEnabled = navDuckingSwitch.isOn
+        CarPlayAudio.duckMusicForNavigation = navDuckingSwitch.isOn
         videoOutputPortField.text = String(defaults.object(forKey: "videoOutputPort") as? Int ?? 9888)
         secureVideoOutputPortField.text = (defaults.object(forKey: "secureVideoOutputPort") as? Int).map { String($0) }
         for (field, label) in [(videoOutputPortField, "HTTP 端口"), (secureVideoOutputPortField, "HTTPS 端口")] {
@@ -2105,11 +2109,17 @@ extension ReceiverViewController {
         reloadVisibleSettings()
     }
     @objc private func audioSettingChanged() {
-        UserDefaults.standard.set(selectedSoundOutput.rawValue, forKey: "soundOutput")
-        CarPlayAudio.preferBluetoothOutput = selectedSoundOutput == .bluetooth
+        // 声音输出不写盘：每次启动都回到默认「随画面传输」。
+        CarPlayAudio.preferBluetoothOutput = false
     }
     @objc private func carLifeAudioToggled() {
         UserDefaults.standard.set(carLifeAudioSwitch.isOn, forKey: "carLifeAudio")
+        reloadVisibleSettings()
+    }
+    @objc private func navDuckingToggled() {
+        UserDefaults.standard.set(navDuckingSwitch.isOn, forKey: "navDuckingMusic")
+        CarLifeOutput.navigationDuckingEnabled = navDuckingSwitch.isOn
+        CarPlayAudio.duckMusicForNavigation = navDuckingSwitch.isOn
         reloadVisibleSettings()
     }
     @objc private func microphoneSourceChanged() {
@@ -2460,41 +2470,16 @@ extension ReceiverViewController {
 
     fileprivate func soundPage() -> SettingsPageController {
         page("声音") { [unowned self] in
-            let choices = SoundOutput.allCases.filter { output in
-                switch output {
-                case .carWithin: return receivesAudioFromAnotherDevice
-                case .phone, .bluetooth: return true
-                case .browser: return outputMode == .browser && videoOutputSwitch.isOn
-                }
-            }
-            let icons = ["speaker.wave.2.fill", "iphone", "wifi", "dot.radiowaves.left.and.right"]
-            let rows = choices.map { output in
-                var row = SettingsRow.action(output.title, icon: (icons[output.rawValue], .systemOrange)) { [unowned self] in
-                    guard !self.running else {
-                        self.alert("请先停止 CarPlay", "停止后即可修改声音输出。")
-                        return
-                    }
-                    self.selectedSoundOutput = output
-                    self.audioSettingChanged()
-                }
-                row.subtitle = { output.explanation }
-                row.checked = { [unowned self] in self.soundOutput == output }
-                return row
-            }
-            var sections = [SettingsSection(footer: videoOutputSwitch.isOn || outputMode == .browser
-                ? "更改在下次启动 CarPlay 时生效。使用 Wi-Fi 伴音时，通话和 Siri 留在 iPhone。"
-                : "更改在下次启动 CarPlay 时生效。", rows)]
-            if outputMode != .browser {
-                var audioRow = SettingsRow.control("随画面传输（车机喇叭出声）", icon: ("airplayaudio", .systemBlue), carLifeAudioSwitch)
-                audioRow.subtitle = {
-                    outputMode == .carLife
-                        ? "把解码后的 PCM 送进 CarLife 的伴音通道（通道 3），由车机的音乐模块播放。"
-                        : "把解码后的 PCM 随画面送到接收端。"
-                }
-                sections.append(SettingsSection(footer: outputMode == .carLife
-                    ? "打开后声音由车机的 CarLife 客户端播放：它会按收到的采样率建 AudioTrack，再放我们送的 PCM16。若车机仍然没声，先确认它连上了 9240 端口（日志里的「CarLife 通道 3 已连接」）。"
-                    : "打开后声音随画面送到接收端。", [audioRow]))
-            }
+            // 声音只有一种输出：随画面传输（Wi‑Fi）。
+            // CarLife 模式走伴音通道由车机播放；浏览器模式由浏览器播放。未连接时静默，不回落 iPhone。
+            var duckRow = SettingsRow.control("导航播报时音乐降低 50%", icon: ("speaker.wave.1.fill", .systemOrange), navDuckingSwitch)
+            duckRow.subtitle = { "导航播报期间把音乐压到一半，播报结束自动恢复；关闭则音量不变。" }
+            let sections = [
+                SettingsSection(footer: "声音随画面走 Wi‑Fi：CarLife 模式由车机播放，浏览器模式由浏览器播放；未连接时保持静默，不回落 iPhone。", [
+                    .info("随画面传输（Wi‑Fi）", "解码后的 PCM 随画面送到接收端，连接建立后自动出声，断开时自动暂停音乐。")
+                ]),
+                SettingsSection(footer: "只影响音乐随画面传输到接收端时的音量。", [duckRow])
+            ]
             return sections
         }
     }
