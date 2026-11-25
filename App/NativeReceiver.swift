@@ -380,7 +380,8 @@ final class NativeReceiver {
             }
         }
         // 兜底：中断结束通知偶尔不到（微信语音常见），30 秒后确认真没在占用就自行收尾。
-        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+        // 3 秒只是检查频率，判定门槛仍是 30 秒，不会在通话中误恢复。
+        let timer = Timer(timeInterval: 3, repeats: true) { [weak self] _ in
             guard let self, CarPlayAudio.outputMuted else { return }
             self.queue.async {
                 guard CarPlayAudio.outputMuted else { return }
