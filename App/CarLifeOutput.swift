@@ -654,6 +654,13 @@ private final class Session {
 
     func receive(_ wire: CarLifeMessage) throws {
         guard active else { return }
+        // 诊断：车机会不会在某条通道上回传数据（通话上行要靠它）。每条通道只记前 12 条，避免刷屏。
+        let seen = inboundCounts[wire.channel] ?? 0
+        if seen < 12 {
+            inboundCounts[wire.channel] = seen + 1
+            let head = wire.payload.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
+            log?("CarLife 通道 \(wire.channel) 入站 #\(seen + 1) id=\(wire.id)，长度 \(wire.payload.count)，首字节 \(head)")
+        }
         // 车机如果对音乐模块有回应（准备/错误码），这里就能看到；一直没有输出说明它压根没派发。
         if wire.channel == 3, channelThreeInbound < 8 {
             channelThreeInbound += 1
@@ -848,6 +855,8 @@ private final class Session {
     private var loggedNoAudioChannel = false
     /// 车机在通道 3 上回过来的消息计数，只记前几条用于诊断。
     private var channelThreeInbound = 0
+    /// 诊断：每个通道的入站消息计数，用来确认车机是否在某条通道上回传麦克风音频。
+    private var inboundCounts: [Int: Int] = [:]
     private var lastPlayAt = DispatchTime(uptimeNanoseconds: 0)
     private var lastAudioAt = DispatchTime(uptimeNanoseconds: 0)
     /// 【停播后仍响】CarPlay 在 iPhone 停止音乐后仍持续推静音帧（日志：数据包一直涨、载荷=6 字节）。
