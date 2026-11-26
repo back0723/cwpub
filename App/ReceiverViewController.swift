@@ -654,7 +654,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         case 3: fps = 60
         default: fps = 30
         }
-        if lightLevel >= 1 { fps = min(fps, 30) }
         let codec: VideoCodec = .h264
         let defaultIconWidth = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
         let iconWidth = followsCarScreen ? screen?.iconWidthMM ?? defaultIconWidth : defaultIconWidth
@@ -1915,7 +1914,7 @@ extension ReceiverViewController {
                 SettingsSection(footer: "帧率可选 25 / 30 / 60 FPS，默认 30（「自动」也走 30）。25 更省带宽，60 需要车机硬解和 Wi-Fi 都跟得上；跟不上会自动降档重启。", [
                     .control("帧率", icon: ("gauge.with.dots.needle.67percent", .systemGreen), frameRateControl)
                 ]),
-                SettingsSection(footer: "画面持续卡顿时，自动以更轻的画面重启 CarPlay（先降到 30 FPS，再降到 720P），每次连接最多两次。", [
+                SettingsSection(footer: "画面持续卡顿时，自动以更轻的画面重启 Carplay（只降到 720P，不动你选的帧率），每次连接最多两次。", [
                     .control("自动重启", icon: ("arrow.clockwise", .systemGreen), autoRestartSwitch)
                 ]),
                 SettingsSection("图标", footer: "图标越小，一页放下的越多。可以在「车机屏幕」为不同屏幕保存图标大小。", [
