@@ -110,16 +110,24 @@ final class CarPlayMediaSession {
                     let route = CarLifeAudioRoute.classify(streamType: streamType, audioType: audioType)
                     CarPlayMediaSession.recordAudioSetup(type: streamType, audioType: audioType)
                     // 【上行端口】iPhone 在 SETUP 里给「要上行」的流都带 dataPort + input=1：
-                    // telephony dataPort=59913、speechrecognition dataPort=49929（1.2 诊断日志实据）。
+                    // telephony dataPort=59913、speechrecognition dataPort=49929（1.2 实据）。
                     // 这个端口就是 iPhone 监听的输入口，把采集到的声音经 DataStream-Input 加密后发过去，
-                    // 对方才听得到。只对 telephony 建麦：speechrecognition 是 Siri 的，不需要。
+                    // 对方才听得到。
+                    // 【1.5 实测教训】这台 iPhone 通话时可能只建 speechRecognition 一路（对方声音也走
+                    // 这一路，Opus 24k），压根不建 telephony；1.3/1.4 只认 telephony → 日志里永远
+                    // 「上行端口：无」，通话上行自然一条都没有。现在两路都收，telephony 优先。
                     var microphonePort: UInt16?
                     let hasInput = (stream["input"] as? NSNumber).map { $0.intValue != 0 } ?? false
-                    if route == .voice, audioType == "telephony", hasInput,
-                       let port = (stream["dataPort"] as? NSNumber)?.uint16Value, port > 0, CarPlayAudio.capturesMicrophone {
-                        microphonePort = port
+                    let rawPort = (stream["dataPort"] as? NSNumber)?.uint16Value ?? 0
+                    if route == .voice, hasInput, rawPort > 0, CarPlayAudio.capturesMicrophone,
+                       ["telephony", "speechrecognition"].contains(audioType) {
+                        microphonePort = rawPort
                     }
-                    onLog?("上行端口：\(microphonePort.map { "\($0)（iPhone 输入口）" } ?? "无")")
+                    if let port = microphonePort {
+                        onLog?("上行端口：\(port)（iPhone 输入口，audioType=\(audioType)）")
+                    } else {
+                        onLog?("上行端口：无（audioType=\(audioType)，input=\(hasInput ? 1 : 0)，dataPort=\(rawPort)）")
+                    }
                     audio.removeValue(forKey: streamType)?.stop()
                     // 通话流（telephony / speechrecognition）标记 isVoice：CarPlayAudio 据此在本机绝不抢
                     // AVAudioSession 路由（抢了会顶断通话）；对方声音走车机通道3、你的声音由麦克风上行。
