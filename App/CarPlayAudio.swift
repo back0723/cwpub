@@ -155,7 +155,10 @@ final class CarPlayAudio {
             // 导航播报压低音乐：导航流有声音就续期 1.5 秒；音乐流在窗口内把 PCM 缩放到 50%。
             // 缩放发生在 onPCM / 浏览器转发 / 本机播放之前，三条出口音量一致。
             if isNavigation { Self.noteNavigation(buffer) }
-            if !isVoice, !Self.outputMuted { Self.lastAudibleAt = DispatchTime.now() }
+            // 只有「真的有人声/音乐」的帧才算在播放：iPhone 音乐暂停后仍会持续送静默帧
+            // （1.7 日志里「iPhone 已停止播放（持续静音）」就是这种帧），若按“收到帧”记时间，
+            // 通话结束后会误判成“之前在播”→ 自动播播放键，音乐自己响起来。
+            if !isVoice, !Self.outputMuted, Self.peakLevel(buffer) > 0.02 { Self.lastAudibleAt = DispatchTime.now() }
             // 通话期间：所有送到接收端（车机 CarLife / 网页）的声音一律静音。
             // 送的是同格式静音帧，通道与格式都不变，车机 AudioTrack 继续跑，恢复后不会重建；
             // 也绝不向 iPhone 发暂停键——音乐只静音，不暂停，CarPlay 会话照常。
@@ -316,6 +319,20 @@ final class CarPlayAudio {
                 onLog?("音频数据包被拒绝：\(error.localizedDescription)（\(format.name) \(format.sampleRate) Hz / \(format.channels) 声道，负载 \(wire.count) 字节）")
             }
         }
+    }
+    /// 这一帧是不是「真的有声音」：峰值超过 -34 dBFS（0.02）才算。
+    /// 供通话前暂停/通话后续播判据使用——iOS 音乐暂停时会持续下发静默帧，不能拿“收到帧”当在播。
+    static func peakLevel(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let data = buffer.floatChannelData, buffer.frameLength > 0 else { return 0 }
+        var peak: Float = 0
+        for channel in 0..<Int(buffer.format.channelCount) {
+            let samples = data[channel]
+            for i in 0..<Int(buffer.frameLength) {
+                let value = abs(samples[i])
+                if value.isFinite, value > peak { peak = value }
+            }
+        }
+        return peak
     }
     /// 导航播报判定：PCM 峰值超过阈值即视为播报中，窗口续期 1.5 秒。
     private static func noteNavigation(_ buffer: AVAudioPCMBuffer) {
