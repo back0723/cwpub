@@ -587,11 +587,15 @@ final class NativeReceiver {
         CarPlayAudio.outputMuted = false
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
         voiceReleaseWork?.cancel(); voiceReleaseWork = nil; carLife.setCallActive(false)
-        // 退出 CarPlay：把 iPhone 上的音乐按成「暂停」——发明确的暂停键（不是 playPause 切换），
-        // 避免本来就在暂停的音乐被切回播放。CarPlay 拔掉后声音回不到车机，就该静下来。
+        // 停止连接：把 iPhone 上的音乐按成「暂停」，而且要保证这颗按键真的送达。
+        // 旧写法是在拆连接前一刻才发 HID，紧跟着 connections.cancel() + media.stop() 就把
+        // 事件通道关掉，`contentProcessed` 还没回来包就被丢了 → 用户看到「停止后音乐还在放」。
+        // 现在：先发暂停键，留 0.4 秒让事件通道把包送出去、让 iPhone 处理，再拆通道。
+        var pauseSent = false
         if let media = activeMedia {
             media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.pause.rawValue]), release: Data([0]))
             assumedPlaying = false
+            pauseSent = true
         }
         generation = UUID(); listener?.cancel(); listener = nil
         if !keepingBrowser { videoOutput.stop(); browserRunning = false }
@@ -605,9 +609,16 @@ final class NativeReceiver {
         #endif
         localSkipping = false; keyframeWantedSince = nil; keyframeLastSent = nil; keyframeAttempts = 0
         touchSlots.reset()
-        for connection in connections.values { connection.cancel() }
-        connections.removeAll()
-        sessions.values.forEach { $0.media?.stop() }; sessions.removeAll()
+        // 通道与媒体会话的拆除延后到暂停键送出之后；会话状态本身已在这里清空，UI 不受影响。
+        let staleConnections = connections
+        let staleSessions = sessions
+        connections.removeAll(); sessions.removeAll()
+        let delays: DispatchTime = .now() + (pauseSent ? 0.4 : 0)
+        DispatchQueue.main.asyncAfter(deadline: delays) {
+            if pauseSent { self.log("停止连接：已发送音乐暂停并断开") }
+            for connection in staleConnections.values { connection.cancel() }
+            staleSessions.values.forEach { $0.media?.stop() }
+        }
     }
     private final class SessionState {
         var parser = RTSPParser()
