@@ -620,32 +620,21 @@ private final class NativeMicrophone {
         #endif
     }
     private func beginCapture() {
-        do {
-            // 后台播音时系统常把会话留在 .playback（或带 .mixWithOthers），此时开录音必然
-            // 报 cannotStartRecording（561145187）。录音前把会话摆回可录状态，并明确用内建麦克风。
-            let session = AVAudioSession.sharedInstance()
-            let callInProgress = session.isOtherAudioPlaying
-            // 【对方听不到根因】旧逻辑："通话中且会话不是 playAndRecord → 等 5 秒再试"。
-            // 但微信/电话通话期间会话一直被占用，这个条件永远成立 → 无限推迟 → 麦克风从头到尾
-            // 没启动（日志反复出现"通话结束后再开麦克风"却再也不开）。真机铁证。
-            // 新逻辑：通话中绝不改类别（改了会顶断微信），直接复用当前会话装 tap 采集；
-            // 只有"当前会话根本不可录"时才如实放弃并给一次明确提示，不再无限等待。
-            if callInProgress {
-                let recordable = session.category == .playAndRecord || session.category == .record
-                if !recordable {
-                    // 【绝不中途切类别】通话进行中 setCategory(.playAndRecord) 会把系统通话/微信的
-                    // 通道路由抢走，历史真机日志直接 `!int` 并顶断 CarLife（画面断开）。
-                    // 本版的可录会话已在启动阶段（BackgroundKeepAlive 读到 telephonyCompat）摆好，
-                    // 正常不会走到这里；真走到了就如实放弃上行，保住通话和画面。
-                    if !loggedWaitingForAudio {
-                        loggedWaitingForAudio = true
-                        onLog?("会话不可录（\(session.category.rawValue)），为不断开通话/画面，本次通话放弃上行")
-                    }
-                    return
+        let session = AVAudioSession.sharedInstance()
+        let callInProgress = session.isOtherAudioPlaying
+        if callInProgress {
+            let recordable = session.category == .playAndRecord || session.category == .record
+            if !recordable {
+                // 【绝不中途切类别】通话进行中 setCategory(.playAndRecord) 会抢走系统通话路由，
+                // 历史真机日志 `!int` 并顶断 CarLife。会话不可录就如实放弃上行，保住通话和画面。
+                if !loggedWaitingForAudio {
+                    loggedWaitingForAudio = true
+                    onLog?("会话不可录（\(session.category.rawValue)），通话中不切类别，本次通话放弃上行")
                 }
-                // 会话已可录：直接装 tap，不改任何类别/选项/路由。
-            } else {
-                // 没有其它 App 占用：正常建立可录会话。
+                return
+            }
+        } else {
+            do {
                 if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
                     try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])
                 }
@@ -653,61 +642,88 @@ private final class NativeMicrophone {
                 if let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
                     try? session.setPreferredInput(builtIn)
                 }
+            } catch {
+                if !loggedFailure {
+                    loggedFailure = true
+                    onLog?("无法启动麦克风：可录会话建立失败（\(error.localizedDescription)），稍后重试")
+                }
+                onStartFailed?()
+                return
             }
-            if format.isOpus { opusEncoder = try NativeOpusEncoder(rate: rate) }
-            // 【build2 失败根因修复】必须在会话切到可录"之后"重建 engine 并 prepare，
-            // 否则 inputNode 还缓存着 playback 类别下的旧格式，sampleRate=0 → 抛「麦克风格式」，
-            // 且三次重试都复用同一个坏 engine，注定全失败。重建后 inputNode 会读取当前硬件格式。
-            engine = AVAudioEngine()
-            try engine.prepare()
-            var input = engine.inputNode.outputFormat(forBus: 0)
-            // 兜底：个别机型/时序下 prepare 后采样率仍可能为 0，用硬件实际采样率重建一个合法格式。
-            if input.sampleRate <= 0 || input.channelCount <= 0,
-               let fallback = AVAudioFormat(standardFormatWithSampleRate: session.sampleRate > 0 ? session.sampleRate : 48000,
-                                            channels: AVAudioChannelCount(max(1, session.inputNumberOfChannels))) {
-                input = fallback
+        }
+        // 【必须先确认真的有输入口】通话中 CarPlay 把音频路由成 CarAudio，这条虚拟路由没有输入口，
+        // 此时访问 AVAudioEngine.inputNode 会抛 ObjC 断言 `inputNode != nullptr || outputNode != nullptr`。
+        // Swift 抓不住这种异常 → 整个进程被杀（1.3 真机崩溃信号 6，画面瞬间断开）。
+        // 所以：先看路由里有没有输入，没有就干净放弃，绝不碰 engine。
+        let outputs = session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ",")
+        let inputs = session.currentRoute.inputs.map { $0.portType.rawValue }.joined(separator: ",")
+        if !session.isInputAvailable || session.currentRoute.inputs.isEmpty {
+            if !loggedNoInput {
+                loggedNoInput = true
+                onLog?("上行不可用：当前路由没有输入口（类别 \(session.category.rawValue)，输出 \(outputs.isEmpty ? "无" : outputs)，输入 无，权限 \(Self.permissionText())）——通话与画面照常")
             }
-            guard input.sampleRate > 0, input.channelCount > 0,
-                  let output = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1),
-                  let converter = AVAudioConverter(from: input, to: output) else { throw ProtocolError.malformed("麦克风格式") }
-            self.converter = converter
-            connection.start(queue: .main)
-            let slots = self.slots
-            engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: input) { [weak self] buffer, _ in
-                guard slots.wait(timeout: .now()) == .success else { return }
-                guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { slots.signal(); return }
-                copy.frameLength = buffer.frameLength
-                let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
-                let target = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
-                for index in 0..<source.count {
-                    if let src = source[index].mData, let dst = target[index].mData {
-                        dst.copyMemory(from: src, byteCount: Int(source[index].mDataByteSize))
+            return
+        }
+        onLog?("上行输入口：\(inputs)，类别 \(session.category.rawValue)，输出 \(outputs.isEmpty ? "无" : outputs)")
+        // 再套一层 ObjC 异常捕获：即使断言仍然抛出，也只是"本次采麦失败"，不会杀进程。
+        var failure: String?
+        let ok = TDSRunCatchingException({ [self] in
+            do {
+                if format.isOpus { opusEncoder = try NativeOpusEncoder(rate: rate) }
+                // 必须在会话可录"之后"重建 engine 并 prepare，否则 inputNode 还缓存着旧格式。
+                engine = AVAudioEngine()
+                try engine.prepare()
+                var input = engine.inputNode.outputFormat(forBus: 0)
+                if input.sampleRate <= 0 || input.channelCount <= 0,
+                   let fallback = AVAudioFormat(standardFormatWithSampleRate: session.sampleRate > 0 ? session.sampleRate : 48000,
+                                                channels: AVAudioChannelCount(max(1, session.inputNumberOfChannels))) {
+                    input = fallback
+                }
+                guard input.sampleRate > 0, input.channelCount > 0,
+                      let output = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1),
+                      let converter = AVAudioConverter(from: input, to: output) else { throw ProtocolError.malformed("麦克风格式") }
+                self.converter = converter
+                connection.start(queue: .main)
+                let slots = self.slots
+                engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: input) { [weak self] buffer, _ in
+                    guard slots.wait(timeout: .now()) == .success else { return }
+                    guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength) else { slots.signal(); return }
+                    copy.frameLength = buffer.frameLength
+                    let source = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+                    let target = UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
+                    for index in 0..<source.count {
+                        if let src = source[index].mData, let dst = target[index].mData {
+                            dst.copyMemory(from: src, byteCount: Int(source[index].mDataByteSize))
+                        }
+                    }
+                    DispatchQueue.main.async { [weak self] in
+                        defer { slots.signal() }
+                        guard let self, self.active else { return }
+                        self.send(copy)
                     }
                 }
-                DispatchQueue.main.async { [weak self] in
-                    defer { slots.signal() }
-                    guard let self, self.active else { return }
-                    self.send(copy)
-                }
+                installedTap = true
+                try engine.start()
+            } catch {
+                failure = error.localizedDescription
             }
-            installedTap = true
-            try engine.start()
-            onLog?("\(format.name) 麦克风已启动：\(rate) Hz 单声道（权限 \(Self.permissionText())）")
-        } catch {
+        })
+        if !ok || failure != nil {
             if !loggedFailure {
                 loggedFailure = true
-                let session = AVAudioSession.sharedInstance()
-                let inputs = session.availableInputs?.map { $0.portType.rawValue }.joined(separator: ",") ?? "无"
-                onLog?("无法启动麦克风：\(error.localizedDescription)（类别 \(session.category.rawValue)，输入 \(inputs)，权限 \(Self.permissionText())），稍后重试")
+                onLog?("无法启动麦克风：\(failure ?? TDSLastExceptionDescription() ?? "未知异常")（类别 \(session.category.rawValue)，输入 \(inputs)，权限 \(Self.permissionText())）——通话与画面照常")
             }
-            onStartFailed?()
-            // 不能调用 stop()：它会把 active 置 false，导致限次重试时 start() 的
-            // `guard active` 直接失败，永远哑。失败只清理本次已装的 tap / 引擎，
-            // 保留 active 与连接，等上层延时重试重新走 beginCapture。
-            if installedTap { engine.inputNode.removeTap(onBus: 0); installedTap = false }
-            engine.stop()
+            // 清理也要防异常：inputNode 为空时 removeTap 同样会崩。
+            if installedTap {
+                _ = TDSRunCatchingException({ [self] in engine.inputNode.removeTap(onBus: 0) })
+                installedTap = false
+            }
+            _ = TDSRunCatchingException({ [self] in engine.stop() })
+            return
         }
+        onLog?("\(format.name) 麦克风已启动：\(rate) Hz 单声道（权限 \(Self.permissionText())）")
     }
+    private var loggedNoInput = false
     private var loggedFailure = false
     static func permissionText() -> String {
         switch AVAudioSession.sharedInstance().recordPermission {
