@@ -107,6 +107,8 @@ final class VideoOutputServer {
     /// so it does not start seconds behind live or decode a huge burst first.
     private let maximumReplayFrames = 45
     var onLog: ((String) -> Void)?
+    /// 车机页面麦克风上行收到的块数（用于首次/周期性日志）。
+    private var browserMicPacketCount = 0
     var onState: ((String) -> Void)?
     /// Source id (one per viewer) and every finger it holds, normalized; empty releases them.
     var onTouches: ((String, [TouchPoint]) -> Void)?
@@ -116,6 +118,8 @@ final class VideoOutputServer {
     /// 车机页面点了"按新尺寸重新适配"：按当前窗口尺寸重连 CarPlay（CarMode 同名功能）。
     var onRefitRequest: ((String) -> Void)?
     var onKeyframeRequest: ((String) -> Void)?
+    /// 车机页面采到的通话上行 PCM（16 kHz / 16 bit / 单声道小端裸数据），由 NativeReceiver 接走。
+    var onBrowserMicrophone: ((Data) -> Void)?
     /// The primary page's screen changed or the primary page disconnected.
     var onDisplay: ((BrowserDisplay?, UUID?) -> Void)?
     /// A page keeps hitching (skips, stalls) despite its performance mode. Called on the server queue.
@@ -450,6 +454,8 @@ final class VideoOutputServer {
             while let frame = try takeWebSocketFrame(from: &client.buffer) {
                 switch frame.opcode {
                 case 1: try handleText(String(decoding: frame.payload, as: UTF8.self), client: client)
+                // 车机页面的麦克风采集（浏览器模式的通话上行）：二进制帧首字节 7 = 16 kHz 单声道 PCM16。
+                case 2: handleBinary(frame.payload, client: client)
                 case 8: close(client, reason: nil); return
                 case 9: sendWebSocket(frame.payload, opcode: 10, to: client)
                 case 10: break
@@ -457,6 +463,35 @@ final class VideoOutputServer {
                 }
             }
         } catch { close(client, reason: "\(client.peer) 协议错误：\(error.localizedDescription)") }
+    }
+
+    /// 车机页面发上来的二进制数据。目前只有一种：首字节 7 = 通话上行 PCM（16 kHz / 16 bit / 单声道小端）。
+    private func handleBinary(_ payload: Data, client: Client) {
+        guard let tag = payload.first, tag == 7 else { return }
+        let pcm = Data(payload.dropFirst())
+        // 32 ms（1024 字节）一块，偶尔被拆/合并都无妨；过小的残块直接丢，避免噪声包。
+        guard pcm.count >= 320 else { return }
+        browserMicPacketCount += 1
+        if browserMicPacketCount == 1 {
+            report("车机页面麦克风上行已接通：第 1 块 \(pcm.count) 字节 PCM（来自 \(client.peer)）")
+        } else if browserMicPacketCount % 200 == 0 {
+            report("车机页面麦克风上行持续：已收 \(browserMicPacketCount) 块，每块 \(pcm.count) 字节")
+        }
+        onBrowserMicrophone?(pcm)
+    }
+
+    /// 通话开始/结束时通知车机页面开、关麦克风采集。浏览器模式没有 CarLife APK，
+    /// 车机的麦克风只能由页面 getUserMedia 采上来，否则上行永远是静音。
+    func setPageMicrophone(_ on: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.browserMicPacketCount = 0
+            for client in Array(self.clients.values) where client.mode == .webSocket {
+                self.sendJSON(["type": "mic", "on": on], to: client)
+            }
+            self.report(on ? "已请求车机页面开启麦克风（浏览器模式通话上行）"
+                           : "已通知车机页面关闭麦克风")
+        }
     }
 
     /// 有没有车机页面在要声音。CarLife 模式下没有页面在听，这时音频要留给手机上本地播放，
