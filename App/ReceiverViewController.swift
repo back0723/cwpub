@@ -54,6 +54,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let carLifeAudioSwitch = UISwitch()
     /// 导航播报时把音乐压低 50% 的开关（设置 → CarPlay → 声音）。
     private let navDuckingSwitch = UISwitch()
+    /// 是否在 /info 里声明 CarPlay 通话能力（telephony 通道 + 电话键）。默认关。
+    private let telephonySwitch = UISwitch()
     /// 要不要在 /info 里向 iPhone 声明音频能力。
     /// CarMode 的日志是"音频开启"才拿到 110 屏幕流；我们回 viewAreas 之后 iPhone 只发三种音频/时钟
     /// 资源就不再发 SETUP(streams)，所以浏览器输出这条路即便声音选"手机"也必须声明音频能力，
@@ -177,7 +179,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private lazy var pictureInPicture = CarPlayPictureInPicture(surface: videoSurface)
     private let keepAlive = BackgroundKeepAlive()
     private let keepAliveSwitch = UISwitch()
-    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay", "台铃 4.3 寸", "九号 5 寸", "极核 6.2 寸"])
+    /// 只保留两种输出：浏览器、CarLife。AirPlay / 台铃 / 九号 / 极核 已全部移除。
+    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife"])
+    /// rawValue 保持不变（历史偏好里可能存着 2…5，载入时会被夹回 browser/carLife）。
     private enum HeadUnitOutput: Int {
         case browser, carLife, airPlay, tailing, ninebot, zeeho
         var usesInstrumentWiFi: Bool { self == .tailing || self == .ninebot || self == .zeeho }
@@ -262,7 +266,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             let pages: [String: () -> UIViewController] = [
                 "display": displayPage, "screens": screensPage, "wifi": wifiPage, "presets": presetsPage,
                 "vehicle": vehiclePage, "sound": soundPage, "output": headUnitPage,
-                "tailing": { [unowned self] in self.headUnitOutput.selectedSegmentIndex = HeadUnitOutput.tailing.rawValue; self.refreshVideoOutputSummary(); return self.headUnitPage() },
                 "web": headUnitPage, "log": logPage, "lab": diagnosticsPage, "about": aboutPage,
                 "usage": usagePage, "updates": aboutPage, "https": httpsSettingsPage]
             if arguments.indices.contains(index + 1), let make = pages[arguments[index + 1]] {
@@ -438,62 +441,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         carLifeSettings.addAction(UIAction { [weak self] _ in self?.revealSettings(output: true) }, for: .touchUpInside)
         carLifeCard.addArrangedSubview(carLifeSettings)
         stack.addArrangedSubview(carLifeCard)
-
-        configureConnectionCard(zeehoCard, title: "极核 6.2 寸连接", symbol: "scooter", color: .systemBlue,
-            instructions: "让 iPhone 加入极核仪表 Wi-Fi，打开仪表投屏后启动 CarPlay。", status: zeehoCardStatus)
-        let zeehoSettings = UIButton(type: .system)
-        zeehoSettings.configuration = .tinted()
-        zeehoSettings.configuration?.title = "连接设置"
-        zeehoSettings.addAction(UIAction { [weak self] _ in self?.revealSettings(output: true) }, for: .touchUpInside)
-        zeehoCard.addArrangedSubview(zeehoSettings)
-        stack.addArrangedSubview(zeehoCard)
-        configureConnectionCard(ninebotCard, title: "九号 5 寸连接", symbol: "scooter", color: .systemBlue,
-            instructions: "让 iPhone 加入仪表 Wi-Fi，打开仪表投屏后启动 CarPlay。", status: ninebotCardStatus)
-        let ninebotSettings = UIButton(type: .system)
-        ninebotSettings.configuration = .tinted()
-        ninebotSettings.configuration?.title = "连接设置"
-        ninebotSettings.addAction(UIAction { [weak self] _ in self?.revealSettings(output: true) }, for: .touchUpInside)
-        ninebotCard.addArrangedSubview(ninebotSettings)
-        stack.addArrangedSubview(ninebotCard)
-        configureConnectionCard(tailingCard, title: "台铃 4.3 寸连接", symbol: "scooter", color: .systemOrange,
-            instructions: "iPhone 加入仪表的 Wi-Fi，打开仪表投屏，再启动本机 CarPlay。画面在仪表上显示，操作在 iPhone 上完成。",
-            status: tailingCardStatus)
-        let tailingSettings = UIButton(type: .system)
-        tailingSettings.configuration = .tinted()
-        tailingSettings.configuration?.title = "连接设置"
-        tailingSettings.addAction(UIAction { [weak self] _ in self?.revealSettings(output: true) }, for: .touchUpInside)
-        tailingCard.addArrangedSubview(tailingSettings)
-        stack.addArrangedSubview(tailingCard)
-
-        configureConnectionCard(airPlayCard, title: "AirPlay 连接", symbol: "airplayvideo", color: .systemBlue,
-            instructions: "接收设备与 iPhone 连同一 Wi-Fi。启动 CarPlay 后，可在这里选择设备。",
-            status: airPlayCardStatus)
-        let routeTitle = UILabel()
-        routeTitle.text = "选择 AirPlay 设备"
-        routeTitle.font = .preferredFont(forTextStyle: .body)
-        routeTitle.adjustsFontForContentSizeCategory = true
-        routeTitle.numberOfLines = 0
-        airPlayRoutePicker.prioritizesVideoDevices = true
-        airPlayRoutePicker.tintColor = .systemBlue
-        airPlayRoutePicker.activeTintColor = .systemGreen
-        airPlayRoutePicker.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.1)
-        airPlayRoutePicker.layer.cornerRadius = 14
-        airPlayRoutePicker.accessibilityLabel = routeTitle.text
-        routeTitle.isAccessibilityElement = false
-        NSLayoutConstraint.activate([
-            airPlayRoutePicker.widthAnchor.constraint(equalToConstant: 44),
-            airPlayRoutePicker.heightAnchor.constraint(equalToConstant: 44)
-        ])
-        let routeRow = UIStackView(arrangedSubviews: [routeTitle, airPlayRoutePicker])
-        routeRow.alignment = .center
-        routeRow.spacing = 8
-        airPlayCard.addArrangedSubview(routeRow)
-        airPlayRetryButton.configuration = .tinted()
-        airPlayRetryButton.configuration?.title = "重试 AirPlay"
-        airPlayRetryButton.addAction(UIAction { [weak self] _ in self?.startAirPlayTransport() }, for: .touchUpInside)
-        airPlayRetryButton.isHidden = true
-        airPlayCard.addArrangedSubview(airPlayRetryButton)
-        stack.addArrangedSubview(airPlayCard)
+        // AirPlay / 台铃 / 九号 / 极核 四种输出已整体移除：卡片不再创建，也不再加入主界面。
+        // 相关字段、状态标签与历史预设保留为不可达代码，避免牵连其它模块，界面上不会再出现。
 
         inlineVideoContainer.isHidden = true
         inlineVideoContainer.clipsToBounds = true
@@ -2011,7 +1960,9 @@ extension ReceiverViewController {
         let previousOutput = defaults.object(forKey: "headUnitOutput") as? Int
         let legacyOutput: HeadUnitOutput = defaults.bool(forKey: "carLifeEnabled") ? .carLife : .browser
         let migratedOutput = previousOutput.map { $0 == 1 ? HeadUnitOutput.carLife : .browser } ?? legacyOutput
-        headUnitOutput.selectedSegmentIndex = (savedOutput.flatMap(HeadUnitOutput.init(rawValue:)) ?? migratedOutput).rawValue
+        // 老偏好里可能存着 airPlay/tailing/ninebot/zeeho（2…5），统一夹回两种合法输出。
+        let savedMode = savedOutput.flatMap(HeadUnitOutput.init(rawValue:)) ?? migratedOutput
+        headUnitOutput.selectedSegmentIndex = (savedMode == .carLife ? HeadUnitOutput.carLife : .browser).rawValue
         headUnitOutput.addTarget(self, action: #selector(headUnitOutputChanged), for: .valueChanged)
         zeehoAddressField.text = defaults.string(forKey: "zeehoAddress") ?? "192.168.0.1"
         zeehoAddressField.keyboardType = .decimalPad
@@ -2033,6 +1984,8 @@ extension ReceiverViewController {
         carLifeAudioSwitch.addTarget(self, action: #selector(carLifeAudioToggled), for: .valueChanged)
         navDuckingSwitch.isOn = defaults.object(forKey: "navDuckingMusic") as? Bool ?? true
         navDuckingSwitch.addTarget(self, action: #selector(navDuckingToggled), for: .valueChanged)
+        telephonySwitch.isOn = defaults.object(forKey: "telephonyCompat") as? Bool ?? false
+        telephonySwitch.addTarget(self, action: #selector(telephonyToggled), for: .valueChanged)
         CarLifeOutput.navigationDuckingEnabled = navDuckingSwitch.isOn
         CarPlayAudio.duckMusicForNavigation = navDuckingSwitch.isOn
         videoOutputPortField.text = String(defaults.object(forKey: "videoOutputPort") as? Int ?? 9888)
@@ -2092,6 +2045,11 @@ extension ReceiverViewController {
         UserDefaults.standard.set(navDuckingSwitch.isOn, forKey: "navDuckingMusic")
         CarLifeOutput.navigationDuckingEnabled = navDuckingSwitch.isOn
         CarPlayAudio.duckMusicForNavigation = navDuckingSwitch.isOn
+        reloadVisibleSettings()
+    }
+    @objc private func telephonyToggled() {
+        UserDefaults.standard.set(telephonySwitch.isOn, forKey: "telephonyCompat")
+        log("CarPlay 通话能力已\(telephonySwitch.isOn ? "声明（音乐有声，通话会被拉进 CarPlay）" : "关闭（通话留给手机/蓝牙）")，下次启动 CarPlay 生效")
         reloadVisibleSettings()
     }
     @objc private func receiverNameChanged() {
@@ -2163,8 +2121,8 @@ extension ReceiverViewController {
                 SettingsSection("2. 选一种输出", [
                     .guide("浏览器", icon: ("globe", .systemTeal),
                            "车机连同一个 Wi-Fi。在「当前输出」选浏览器，启动 CarPlay，再用车机打开首页显示的 HTTP 地址。"),
-                    .guide("车机或仪表", icon: ("car.fill", .systemIndigo),
-                           "选你的设备支持的输出。CarLife 先打开车机上的 CarLife；台铃和九号先加入仪表 Wi-Fi、打开仪表投屏；AirPlay 在首页选接收设备。")
+                    .guide("CarLife", icon: ("car.fill", .systemIndigo),
+                           "先打开车机上的 CarLife，再在「当前输出」选 CarLife 并启动 CarPlay。只有浏览器和 CarLife 两种输出。")
                 ]),
                 SettingsSection("3. 常见问题", [
                     .guide("卡在正在连接", icon: ("arrow.clockwise", .systemOrange),
@@ -2433,11 +2391,14 @@ extension ReceiverViewController {
             // CarLife 模式走伴音通道由车机播放；浏览器模式由浏览器播放。未连接时静默，不回落 iPhone。
             var duckRow = SettingsRow.control("导航播报时音乐降低 50%", icon: ("speaker.wave.1.fill", .systemOrange), navDuckingSwitch)
             duckRow.subtitle = { "导航播报期间把音乐压到一半，播报结束自动恢复；关闭则音量不变。" }
+            var callRow = SettingsRow.control("声明 CarPlay 通话能力（电话进车机）", icon: ("phone.fill", .systemRed), telephonySwitch)
+            callRow.subtitle = { "默认关闭：/info 里不写 telephony、也不发电话键，iPhone 只把音乐/导航送到车机，电话与微信通话留在手机本身或车机蓝牙，画面不受影响。打开后恢复历史那套完整声明（音乐同样有声），但通话会被拉进 CarPlay，而本机不供麦，通话双方听不到。" }
             let sections = [
                 SettingsSection(footer: "声音随画面走 Wi‑Fi：CarLife 模式由车机播放，浏览器模式由浏览器播放；未连接时保持静默，不回落 iPhone。", [
                     .info("随画面传输（Wi‑Fi）", "解码后的 PCM 随画面送到接收端，连接建立后自动出声，断开时自动暂停音乐。")
                 ]),
-                SettingsSection(footer: "只影响音乐随画面传输到接收端时的音量。", [duckRow])
+                SettingsSection(footer: "只影响音乐随画面传输到接收端时的音量。", [duckRow]),
+                SettingsSection(footer: "两个档位：关闭=只播媒体、通话不接管；打开=完整声明（音乐有声但通话进车机）。改完需重启 CarPlay。", [callRow])
             ]
             return sections
         }
