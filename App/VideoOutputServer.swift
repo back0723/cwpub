@@ -127,6 +127,8 @@ final class VideoOutputServer {
     // 30fps 原尺寸它扛不住，这里降到 15fps + 1280 宽上限（页面 canvas 再放大到满屏）。
     private let jpegEncoder = BrowserJPEGEncoder(quality: 0.45, maximumFPS: 15)
     var onAirPlayReady: ((UUID) -> Void)?
+    /// 观看端上报的浏览器标识，用来判断是不是「老车机浏览器」（Chromium < 60）。
+    var onViewerUserAgent: ((String) -> Void)?
 
     private var viewerCount: Int { clients.values.filter { $0.mode != .request }.count }
     private var hasJPEGViewers: Bool { clients.values.contains { $0.usesJPEG && $0.mode == .webSocket } }
@@ -452,6 +454,7 @@ final class VideoOutputServer {
             if let ua = object["ua"] as? String, !ua.isEmpty, ua != client.userAgent {
                 client.userAgent = ua
                 onLog?("\(client.peer) 浏览器标识：\(ua)")
+                onViewerUserAgent?(ua)
             }
             client.webCodecs = webCodecs
             client.usesAudioClock = browserAudio && object["audioClock"] as? Bool == true
