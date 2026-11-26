@@ -158,15 +158,10 @@ final class BackgroundKeepAlive {
                 onLog?("后台保持准备：类别 \(session.category.rawValue)，模式 \(session.mode.rawValue)，选项 \(session.categoryOptions.rawValue)，路由 \(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","))")
             }
             if touchingSession {
-                // 【通话上行】声明了 CarPlay 通话能力时要给 iPhone 上行送麦，采集必须走「可录会话」。
-                // 可录会话必须在通话开始前就摆好：通话中途 setCategory 会把系统通话的路由抢走、
-                // 进而顶断 CarPlay 会话（历史真机日志：!int → 画面断开）。所以这里在启动阶段一次到位。
-                if CarPlayInfo.telephonyCompat && session.category != .playAndRecord {
-                    try session.setCategory(.playAndRecord, mode: .default,
-                                            options: [.defaultToSpeaker])
-                } else if CarPlayInfo.telephonyCompat && session.category == .playAndRecord {
-                    // 已可录：不追加选项，保持可录状态。
-                } else if session.category != .playback && session.category != .playAndRecord {
+                // 【不要预置可录会话】1.3 试过在启动时把类别换成 .playAndRecord，真机结果：
+                // 静音保活播放器被系统拒绝（「后台保持开启失败：系统拒绝播放」），通话中保活恢复连续失败，
+                // 反而把会话搅乱。保活必须留在 .playback + mixWithOthers——这是 1.1/1.2 实测稳定的形态。
+                if session.category != .playback && session.category != .playAndRecord {
                     try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
                 } else if session.category == .playback && !session.categoryOptions.contains(.mixWithOthers) {
                     // CarPlay playback may have selected this category without mixing. Silent
