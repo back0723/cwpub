@@ -651,7 +651,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         switch frameRateControl.selectedSegmentIndex {
         case 1: fps = 30
         case 2: fps = 60
-        default: fps = screen.map { (1..<45).contains($0.refreshHz) ? 30 : 60 } ?? 60
+        default: fps = 30
         }
         fps = min(fps, 30)
         let codec: VideoCodec = .h264
@@ -1573,7 +1573,7 @@ extension ReceiverViewController {
             $0.title == defaults.string(forKey: "displayAspectRatio")
         }.map { $0 + 1 } ?? 0
         sizeModeControl.selectedSegmentIndex = defaults.object(forKey: "displaySizeMode") as? Int ?? 0
-        frameRateControl.selectedSegmentIndex = [0: 0, 30: 1, 60: 2][defaults.object(forKey: "displayMaxFPS") as? Int ?? 60] ?? 2
+        frameRateControl.selectedSegmentIndex = [0: 0, 30: 1, 60: 2][defaults.object(forKey: "displayMaxFPS") as? Int ?? 30] ?? 1
         let savedWidth = defaults.object(forKey: "widthPhysicalMM") as? Int ?? CarPlayInfo.defaultWidthPhysicalMM
         iconSizeControl.selectedSegmentIndex = ReceiverConfiguration.iconSizes.firstIndex { $0.widthMM == savedWidth } ?? 1
         autoRestartSwitch.isOn = defaults.object(forKey: "autoRestart") as? Bool ?? false
@@ -1911,7 +1911,7 @@ extension ReceiverViewController {
                     : "选择比例后按分辨率档位计算尺寸，短边至少 320 像素，实际值见下方。2K/4K 会增加发热和带宽。")
                     + (!followsCarScreen ? "\n此输出受 1920×1080 限制，较长的竖屏比例以实际尺寸为准。" : "")
                     + "\n下次启动：\(plan.width)×\(plan.height) · \(plan.fps) FPS · \(plan.codec.displayName)", size),
-                SettingsSection(footer: "自动帧率按记录的车机屏幕选择 30 或 60 FPS。", [
+                SettingsSection(footer: "帧率默认 30 FPS；车机 CarLife 最高 30 FPS，选 60 也会按 30 输出。", [
                     .control("帧率", icon: ("gauge.with.dots.needle.67percent", .systemGreen), frameRateControl)
                 ]),
                 SettingsSection(footer: "画面持续卡顿时，自动以更轻的画面重启 CarPlay（先降到 30 FPS，再降到 720P），每次连接最多两次。", [
