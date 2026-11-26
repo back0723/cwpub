@@ -420,6 +420,9 @@ final class CarPlayAudio {
     private var loggedVehicleMicNoLink = false
     /// 车机麦 PCM 入口：CarLife 通道 5（id 0x58001）送来的 16 kHz 单声道 PCM16。
     /// 由 NativeReceiver 转发进来，最终经 MicrophonePacketizer 发回 iPhone 的 dataPort。
+    /// 这一路是否真能把车机麦 PCM 发回 iPhone（通话流 + 已建立上行端口）。
+    var hasVehicleUplink: Bool { isVoice && microphone != nil }
+
     func feedVehicleMicrophone(_ pcm: Data) {
         // 只有通话流（isVoice）才有上行链路；音乐/导航流直接忽略，避免白转码。
         guard isVoice else { return }
