@@ -758,9 +758,9 @@ private final class Session {
                 throw CarLifeError.protocolViolation("invalid_display")
             }
             let requestedFPS = Int(payload.number(3) ?? 0)
-            fps = requestedFPS > 0 ? min(max(requestedFPS, 1), maxFPS) : maxFPS
+            fps = maxFPS
             encoderChannel = message.channel
-            log?("车机屏幕 \(rawWidth)×\(rawHeight)，请求 \(requestedFPS) FPS；发送 \(width)×\(height) @ \(fps) FPS H.264")
+            log?("车机屏幕 \(rawWidth)×\(rawHeight)，请求 \(requestedFPS) FPS；按设置发送 \(width)×\(height) @ \(fps) FPS H.264")
             send(encoderChannel, 65544, CarLifeProtoWriter().number(1, Int64(width)).number(2, Int64(height)).number(3, Int64(fps)).data)
         case 98313:
             try require(authenticated, "unexpected_phase")
