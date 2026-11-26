@@ -214,6 +214,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var updateTimer: Timer?
     private weak var updateSheet: UIViewController?
     private var updateSheetAutomatic = false
+    /// 本分支自己的仓库；关于页的「本项目」指向它，原项目只作为 GPL 来源保留。
+    private static let ownerRepoURL = URL(string: "https://github.com/back0723/cwpub")!
     private static let projectURL = URL(string: "https://github.com/xmz28/CarWithin")!
     private static let releasesURL = projectURL.appendingPathComponent("releases")
     private static let supportURL = URL(string: "https://qr.alipay.com/fkx16608y1puemmltuocze0")!
@@ -2035,7 +2037,10 @@ extension ReceiverViewController {
     private func aboutLinks() -> [SettingsRow] {
         // 去掉了"检查更新 / 版本记录"：这个共存版不联网查版本。
         [
-            .externalLink("CarWithin 原项目（GPL-3.0）", icon: ("chevron.left.forwardslash.chevron.right", .systemIndigo)) {
+            .externalLink("本项目 GitHub", icon: ("chevron.left.forwardslash.chevron.right", .systemIndigo)) {
+                UIApplication.shared.open(Self.ownerRepoURL)
+            },
+            .externalLink("CarWithin 原项目（GPL-3.0）", icon: ("book.closed.fill", .systemGray2)) {
                 UIApplication.shared.open(Self.projectURL)
             }
         ]
