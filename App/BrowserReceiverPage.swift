@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.9.5-ycarwith"
+    static let version = "1.9.6-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -319,6 +319,74 @@ function ensureAudioPlayback(fromGesture){
  }
 }
 if(enableAudio)enableAudio.onclick=()=>ensureAudioPlayback(true);
+
+// ---------- call uplink: the car's own microphone (browser mode only) ----------
+// CarLife mode sends your voice through the re-signed APK's AudioRecord. In pure browser mode
+// there is no APK, so the page itself must capture the head unit mic and push 16 kHz mono PCM16
+// (first byte 7) over the WebSocket; the phone feeds it into the same uplink encoder.
+let micState={stream:null,context:null,source:null,node:null,packets:0,wanted:false,reporting:'',lastTry:0};
+function micAPI(){
+ if(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)return c=>navigator.mediaDevices.getUserMedia(c);
+ const legacy=navigator.getUserMedia||navigator.webkitGetUserMedia;
+ if(legacy)return c=>new Promise((res,rej)=>legacy.call(navigator,c,res,rej));
+ return null
+}
+function sendPCM(buffer){if(ws&&ws.readyState===1){try{ws.send(buffer)}catch(e){}}}
+function micDownsample(samples,from,to){
+ const ratio=from/to,length=Math.floor(samples.length/ratio);
+ if(!(length>0))return null;
+ const buffer=new ArrayBuffer(1+length*2),view=new DataView(buffer);
+ view.setUint8(0,7);
+ for(let i=0;i<length;i++){
+  const start=Math.floor(i*ratio),end=Math.min(samples.length,Math.floor((i+1)*ratio));
+  let sum=0;
+  for(let j=start;j<end;j++)sum+=samples[j];
+  const n=end>start?sum/(end-start):0;
+  view.setInt16(1+i*2,n<0?n*32768:n*32767,true);
+ }
+ return buffer
+}
+function startMic(){
+ if(micState.stream||micState.node)return;
+ micState.wanted=true;
+ if(!AudioContextClass){report('error','车机麦克风不可用：浏览器没有 Web Audio');return}
+ const api=micAPI();
+ if(!api){report('error','车机麦克风不可用：浏览器没有 getUserMedia');return}
+ const now=performance.now();
+ if(now-micState.lastTry<1200)return;
+ micState.lastTry=now;
+ api({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1},video:false}).then(stream=>{
+  micState.stream=stream;
+  try{
+   micState.context=new AudioContextClass();
+   micState.source=micState.context.createMediaStreamSource(stream);
+   const size=4096;
+   micState.node=micState.context.createScriptProcessor?
+    micState.context.createScriptProcessor(size,1,1):
+    micState.context.createJavaScriptNode(size,1,1);
+   const rate=micState.context.sampleRate||48000;
+   micState.node.onaudioprocess=e=>{
+    if(!ws||ws.readyState!==1)return;
+    const pcm=micDownsample(e.inputBuffer.getChannelData(0),rate,16000);
+    if(!pcm)return;
+    sendPCM(pcm);
+    if(micState.packets++===0)report('info','车机麦克风已开始上行（'+rate+' Hz → 16000 Hz）');
+   };
+   micState.source.connect(micState.node);micState.node.connect(micState.context.destination);
+   report('info','车机麦克风已开启（'+rate+' Hz → 16000 Hz 上行）');
+  }catch(e){report('error','车机麦克风初始化失败：'+e.message)}
+ },err=>{
+  const name=(err&&(err.name||err.message))||String(err);
+  if(micState.reporting!==name){micState.reporting=name;report('error','车机麦克风被拒绝或不可用：'+name)}
+ })
+}
+function stopMic(){
+ micState.wanted=false;micState.packets=0;
+ if(micState.node){try{micState.node.disconnect()}catch(e){}micState.node.onaudioprocess=null;micState.node=null}
+ if(micState.source){try{micState.source.disconnect()}catch(e){}micState.source=null}
+ if(micState.stream){try{micState.stream.getTracks().forEach(t=>t.stop())}catch(e){}micState.stream=null}
+ if(micState.context){try{micState.context.close()}catch(e){}micState.context=null}
+}
 function packetTimestamp(u){
  const time=new DataView(u.buffer,u.byteOffset+1,8);
  return time.getUint32(0)*4294967296+time.getUint32(4);
@@ -495,6 +563,7 @@ function onText(m){
   if(rtt<=bestRtt*1.5||performance.now()-bestAt>30000){clockOffset=m.s-(m.t0+t3)/2;bestRtt=Math.min(rtt,bestRtt);bestAt=performance.now()}
   return}
  if(m.type==='status'){if(!shown)setStatus(m.text);return}
+ if(m.type==='mic'){if(m.on)startMic();else stopMic();return}
  if(m.type!=='format')return;
  if(m.page!==PAGE_VERSION){location.reload();return}
  hideStartCard();
@@ -849,6 +918,10 @@ function bindTouchInput(){
  document.addEventListener('mouseup',()=>liftPoint('m'),true);
 }
 bindTouchInput();
+// 通话进行中如果麦克风还没起来（老浏览器要求用户手势里才能申请），车机上一次点按就再试一次。
+['pointerdown','touchstart','mousedown'].forEach(n=>document.addEventListener(n,()=>{
+ if(micState.wanted&&!micState.stream)startMic();
+},true));
 function moveDot(f){if(f.dot){f.dot.style.left=f.cx+'px';f.dot.style.top=f.cy+'px'}}
 touchLayer.addEventListener('contextmenu',e=>e.preventDefault());
 document.addEventListener('mousemove',wake);
