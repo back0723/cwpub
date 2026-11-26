@@ -379,7 +379,6 @@ final class NativeReceiver {
     /// 通话静音观察者：电话 / 微信语音 / FaceTime 触发 AVAudioSession 中断。
     private var callMuteObserver: NSObjectProtocol?
     private var callTimer: Timer?
-    private var wasPlayingBeforeCall = false
     private var callMutedAt = Date.distantPast
     private var lastLoggedMuteSecond = 0
     private var loggedKeepAliveLoss = false
@@ -428,20 +427,13 @@ final class NativeReceiver {
         carLife.startVehicleMicrophone()
         // 浏览器模式下没有 CarLife，车机麦要靠页面自己采：让页面在通话期间开麦克风。
         videoOutput.setPageMicrophone(true)
-        // 【不要凭空续播】只认一条硬证据：通话前 8 秒内真的收到过音乐流（音乐没暂停才会有流）。
-        // 以前这里用 assumedPlaying（默认 true，且会被 playPause/断开等路径写成 true），
-        // 于是「本来根本没在放音乐」的情况也被判成“通话前在播” → 挂断自动发播放键，
-        // 音乐自己响起来（1.7 实测：先车机响、停止后又回到手机响）。
-        let sinceAudible = DispatchTime.now().uptimeNanoseconds - CarPlayAudio.lastAudibleAt.uptimeNanoseconds
-        wasPlayingBeforeCall = sinceAudible < 8_000_000_000
-        guard wasPlayingBeforeCall, let media = activeMedia else {
-            log("通话开始：车机静音（音乐本来没在播）")
-            return
-        }
-        // 与原生 CarPlay 一致：通话占音频焦点时停止音乐，通话结束再补一次播放。
-        media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.pause.rawValue]), release: Data([0]))
-        assumedPlaying = false
-        log("通话开始：已暂停音乐，通话结束自动续播")
+        // 【不碰音乐】这里以前会给 iPhone 发暂停键、挂断再补播放键，靠"8 秒内听到过音频"猜
+        // 通话前在不在放歌。这个猜测必然出错：刚暂停歌 5 秒就来的电话会被判成"在播"，
+        // 挂断后我们替用户按了播放，本来没放的音乐自己响起来（两种模式都复现过）。
+        // 现在通话只做一件事：把送往车机/浏览器的声音静音（outputMuted）。
+        // 音乐的播放/暂停状态完全交给 iOS 和 CarPlay 自己管：它自己暂停的自己会恢复，
+        // 用户自己暂停的永远不该被我们按响。通话前什么状态，挂断后还是什么状态。
+        log("通话开始：通话期间只静音，不改音乐的播放/暂停状态")
     }
 
     private func endCallOnQueue() {
@@ -450,26 +442,9 @@ final class NativeReceiver {
         // 通话结束：让车机停止采麦，释放车机硬件麦。
         carLife.stopVehicleMicrophone()
         videoOutput.setPageMicrophone(false)
-        guard wasPlayingBeforeCall, let media = activeMedia else {
-            if !wasPlayingBeforeCall, activeMedia != nil {
-                log("通话结束：通话前音乐本来没在播，不发播放键（避免自己响起来）")
-            }
-            wasPlayingBeforeCall = false
-            return
-        }
-        // 补一次明确的播放键（不是 playPause 切换），避免把用户的暂停状态翻过来。
-        media.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.play.rawValue]), release: Data([0]))
-        assumedPlaying = true
-        wasPlayingBeforeCall = false
-        log("通话结束：已恢复音乐播放")
-        // 自检：2 秒后如果仍没有非静音 PCM 回来，说明播放键没落地，补发一次（只补一次）。
-        queue.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, !CarPlayAudio.outputMuted, self.assumedPlaying else { return }
-            let now = DispatchTime.now().uptimeNanoseconds
-            guard now - CarPlayAudio.lastAudibleAt.uptimeNanoseconds > 2_000_000_000 else { return }
-            self.activeMedia?.pressHID(CarPlayInfo.HID.media, Data([CarPlayInfo.MediaKey.play.rawValue]), release: Data([0]))
-            self.log("通话结束：2 秒没等到音频流，已补发一次播放键")
-        }
+        // 不发播放键：避免挂断后音乐自己响起来。通话前在播就继续播（iOS 自己恢复），
+        // 通话前没播就保持安静。
+        log("通话结束：恢复声音输出（音乐保持通话前的状态，不自动播放）")
     }
 
     func stop() { queue.async { [weak self] in self?.stopOnQueue(keepingBrowser: true) } }
@@ -625,7 +600,6 @@ final class NativeReceiver {
             NotificationCenter.default.removeObserver(observer); callMuteObserver = nil
         }
         callTimer?.invalidate(); callTimer = nil
-        wasPlayingBeforeCall = false
         CarPlayAudio.outputMuted = false
         DispatchQueue.main.async { [weak self] in self?.discoveryService?.stop(); self?.discoveryService = nil }
         voiceReleaseWork?.cancel(); voiceReleaseWork = nil; carLife.setCallActive(false)
