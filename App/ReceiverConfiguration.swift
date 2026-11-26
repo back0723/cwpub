@@ -15,12 +15,10 @@ struct ReceiverConfiguration {
     var videoCodec: VideoCodec = .h264
     var wifiChannel: UInt8 = 36
     var audioEnabled = true
-    var browserAudio = false
     var airPlayStreamID: UUID?
     var rightHandDrive = false
+    /// AirPlay 投送（HLS）用的本地端口；网页接收页已移除，只剩这一路推流。
     var videoOutputPort: UInt16?
-    /// HTTPS (WebCodecs) port; nil disables it. Defaults to the HTTP port + 1.
-    var secureVideoOutputPort: UInt16?
     let deviceID: String
     /// Experimental CarLife output to a head unit; needs H.264 at or below 1920×1080.
     var carLifeEnabled = false
@@ -30,16 +28,12 @@ struct ReceiverConfiguration {
     /// 声音页现在只提供「由 iPhone 输出」与「随画面传输（Wi‑Fi）」两种，
     /// 因此这个开关固定为 false，保留字段只为兼容旧配置。
     var carLifeAudio = false
-    /// 声音输出：true = 解码后的 PCM 随画面送浏览器（网页播放）；false = iPhone 本机播放。
-    var audioToBrowser = false
-    /// 「由 iPhone 输出」：只有它为 true 时，未连上接收端才允许本机播放；
-    /// 「随画面传输」连不上时保持静默，不回落到 iPhone。
+    /// 本机播放与静音策略：只为「由 iPhone 输出」保留。
     var audioLocal = false
     var carLinkRelayAddress: String?
     static let carLinkRelayPort: UInt16 = 24890
     /// Physical width declared to the iPhone; larger values fit more (smaller) icons per page.
     var widthPhysicalMM = CarPlayInfo.defaultWidthPhysicalMM
-    var browserPerformance: BrowserPerformance = .auto
     var showTouches = false
     /// Square PNG (≤ 192 px) for the car button on the CarPlay home screen; nil hides it.
     var oemIconPNG: Data?
