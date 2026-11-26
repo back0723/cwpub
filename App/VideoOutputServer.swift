@@ -131,7 +131,7 @@ final class VideoOutputServer {
     // 车机是 1GB RAM 的安卓 4.2：每帧 JPEG 的尺寸和帧率直接决定它卡不卡。
     // CarMode 2.5 在这块屏上是 1436×640 / 30 fps 的 MJPEG，这里按同一组数走；
     // 页面用 multipart/x-mixed-replace 的 <img> 直接吃流，不再走 WebSocket 一帧一帧地塞 blob。
-    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.6, maximumFPS: 30, maximumWidth: 1436)
+    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.5, maximumFPS: 25, maximumWidth: 1436)
     var onAirPlayReady: ((UUID) -> Void)?
     /// 观看端上报的浏览器标识，用来判断是不是「老车机浏览器」（Chromium < 60）。
     var onViewerUserAgent: ((String) -> Void)?
