@@ -68,6 +68,8 @@ final class VideoOutputServer {
         var carModeEpoch = 1
         /// 已经给 CarMode 页面发过 phase=ready。
         var carModeReadySent = false
+        /// 已经给 CarMode 页面发过「可以出图」的 ready 状态（页面靠 phase=ready 才会画图）。
+        var carModeStateReadySent = false
         let secure: Bool
         init(connection: NWConnection, secure: Bool) {
             self.connection = connection; self.secure = secure
@@ -169,6 +171,11 @@ final class VideoOutputServer {
                 for client in Array(self.clients.values) {
                     if client.carMode, client.usesJPEG, client.mode == .webSocket {
                         // CarMode 页面的兼容画面就是 tag 3 + 一整张 JPEG，页面按图片自然尺寸画。
+                        // 页面只有 phase=ready 才会把图画出来，所以第一张图前面补一个 ready。
+                        if !client.carModeStateReadySent {
+                            client.carModeStateReadySent = true
+                            self.sendCarModeState("ready", message: "正在显示 CarPlay", to: client)
+                        }
                         var packet = Data([3])
                         packet.append(jpeg)
                         self.sendWebSocket(packet, opcode: 2, to: client)
@@ -600,7 +607,18 @@ final class VideoOutputServer {
         case "start":
             guard client.carMode else { break }
             onLog?("\(client.peer) 在车机页面上点了「开始投屏」")
-            sendCarModeState("connecting", message: "正在准备画面", to: client)
+            // 车机是 512MB/1GB 的安卓 4.2 + Crosswalk 23：给它喂 1080p High profile 的裸 AU，
+            // 它的 MSE 4 秒内就把渲染进程搞崩（日志里每 4 秒一次「页面主动断开」就是它），
+            // 所以 CarMode 模式直接走这条兼容画面：整张 JPEG（tag 3）画进 canvas。
+            // CarMode 2.5 在这块屏上跑的也是 JPEG（1436×640），不是 H.264。
+            client.usesJPEG = true
+            client.waitingForIDR = false
+            client.streamStarted = true
+            if parameters.isComplete { jpegEncoder.configure(parameters: parameters) }
+            onKeyframeRequest?("\(client.peer)：CarMode 兼容画面")
+            sendJSON(["type": "state", "phase": "connecting", "message": "正在准备兼容画面",
+                      "epoch": client.carModeEpoch, "audio": browserAudio, "audioKey": NSNull(),
+                      "refitAvailable": true, "jpeg": true], to: client)
             onStartRequest?(client.peer)
         case "touch":
             guard client.carMode else { break }
@@ -920,6 +938,15 @@ final class VideoOutputServer {
                     client.waitingForIDR = false; client.streamStarted = true
                     sendCarModeState("ready", message: "已连接 CarPlay", to: client)
                     report("\(client.peer) 已开始显示 CarPlay（JMuxer 硬解）")
+                    // 车机是 1GB 的安卓 4.2 + Crosswalk：真能硬解 High profile 的不多，解不动时
+                    // 画面就一直是「正在准备画面」。5 秒内页面没报「画出第一帧」就自动转兼容画面，
+                    // 不用人手动点，也不用重连。
+                    let id = client.id
+                    queue.asyncAfter(deadline: .now() + 5) { [weak self] in
+                        guard let self, let target = self.clients[id], target.carMode,
+                              !target.carModeReadySent, !target.usesJPEG else { return }
+                        self.switchCarModeToJPEG(target)
+                    }
                 }
                 // 首字节必须是 1：CarMode 页面就是靠 bytes[0]===1 认 H.264 访问单元的，
                 // 之前错发成 7，页面直接忽略每一帧——这就是 1.9.8 的黑屏。
@@ -975,6 +1002,20 @@ final class VideoOutputServer {
         sendJSON(["type": "state", "phase": phase, "message": message,
                   "epoch": client.carModeEpoch, "audio": browserAudio,
                   "audioKey": NSNull(), "refitAvailable": true], to: client)
+    }
+
+    /// 这台车机解不了这路 H.264：让页面切到兼容画面，服务端也改用整张 JPEG（tag 3）。
+    private func switchCarModeToJPEG(_ client: Client) {
+        guard client.carMode, !client.usesJPEG else { return }
+        client.usesJPEG = true
+        client.waitingForIDR = false
+        client.streamStarted = true
+        if parameters.isComplete { jpegEncoder.configure(parameters: parameters) }
+        sendJSON(["type": "state", "phase": "ready", "message": "已切换到兼容画面",
+                  "epoch": client.carModeEpoch, "audio": browserAudio, "audioKey": NSNull(),
+                  "refitAvailable": true, "jpeg": true], to: client)
+        onLog?("\(client.peer) 5 秒没画出第一帧，改用兼容画面（JPEG）")
+        onKeyframeRequest?("\(client.peer)：兼容画面需要关键帧")
     }
 
     private func sendJSON(_ object: [String: Any], to client: Client) {
