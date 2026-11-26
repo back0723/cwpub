@@ -109,6 +109,8 @@ final class VideoOutputServer {
     var onLog: ((String) -> Void)?
     /// 车机页面麦克风上行收到的块数（用于首次/周期性日志）。
     private var browserMicPacketCount = 0
+    /// 当前占用麦克风上行的页面（同一时间只收一台，避免重复上行）。
+    private var browserMicOwner: UUID?
     var onState: ((String) -> Void)?
     /// Source id (one per viewer) and every finger it holds, normalized; empty releases them.
     var onTouches: ((String, [TouchPoint]) -> Void)?
@@ -471,6 +473,9 @@ final class VideoOutputServer {
         let pcm = Data(payload.dropFirst())
         // 32 ms（1024 字节）一块，偶尔被拆/合并都无妨；过小的残块直接丢，避免噪声包。
         guard pcm.count >= 320 else { return }
+        // 同一时间只认一台页面的麦克风（桌面上也开着接收页时，避免两路 PCM 叠在一起上行）。
+        if let owner = browserMicOwner, owner != client.id { return }
+        browserMicOwner = client.id
         browserMicPacketCount += 1
         if browserMicPacketCount == 1 {
             report("车机页面麦克风上行已接通：第 1 块 \(pcm.count) 字节 PCM（来自 \(client.peer)）")
@@ -486,6 +491,7 @@ final class VideoOutputServer {
         queue.async { [weak self] in
             guard let self else { return }
             self.browserMicPacketCount = 0
+            self.browserMicOwner = nil
             for client in Array(self.clients.values) where client.mode == .webSocket {
                 self.sendJSON(["type": "mic", "on": on], to: client)
             }
