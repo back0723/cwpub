@@ -60,6 +60,7 @@ final class NativeReceiver {
     private var pendingRelease: [CarPlayInfo.TouchContact]?
     private var touchDownAt = 0.0
     private var lastTouchLog = 0.0
+    private var lastTouchReleaseLog = 0.0
     /// 上一次发出的音乐状态，用来决定"播放/暂停"该明确发哪一个键。
     // 是否认为音乐在播放：只用于「播放/暂停键」的内部分账，绝不作为通话后续播的判据
     // （1.7 实测教训：默认 true 会让没在播的音乐在通话后自己响起来）。默认按“没在播”。
@@ -500,6 +501,11 @@ final class NativeReceiver {
         }
         // 还有手指没抬起来时不做延时，避免把别人的手指一起放掉。
         guard !contacts.isEmpty else { return }
+        // 抬起也记一笔：车机上"点不动"要先分清是手指报告没到、还是按下了却没有抬起。
+        if now - lastTouchReleaseLog > 1 {
+            lastTouchReleaseLog = now
+            log("触控抬起")
+        }
         let elapsed = now - touchDownAt
         let hold = 0.08
         if elapsed < hold {
