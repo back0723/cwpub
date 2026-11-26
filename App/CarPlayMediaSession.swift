@@ -91,6 +91,15 @@ final class CarPlayMediaSession {
             var replies: [[String: Any]] = []
             for stream in streams {
                 guard let type = stream["type"] as? NSNumber else { throw ProtocolError.malformed("媒体流类型") }
+                // 诊断：把这一路流的全部键打印出来，确认 iPhone 有没有给上行端口、input 标志是否出现。
+                let detail = stream.keys.sorted().map { key -> String in
+                    let value = stream[key]
+                    if let text = value as? String { return "\(key)=\(text)" }
+                    if let number = value as? NSNumber { return "\(key)=\(number)" }
+                    if let list = value as? [Any] { return "\(key)=[\(list.count) 项]" }
+                    return "\(key)=?"
+                }.joined(separator: "；")
+                onLog?("媒体流明细：\(detail)")
                 onLog?("已请求媒体流 \(type)，音频格式 \((stream["audioFormat"] as? NSNumber)?.stringValue ?? "无")")
                 if [100, 101, 102].contains(type.intValue), audioEnabled {
                     guard eventListener != nil, let connectionID = stream["streamConnectionID"] as? NSNumber,
