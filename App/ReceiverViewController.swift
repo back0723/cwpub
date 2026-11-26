@@ -1526,8 +1526,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         if let reason = pendingRestartReason {
             pendingRestartReason = nil
             restartCarPlay(reason: reason, forPerformance: true)
-        } else {
-            scheduleScreenAdaptation()
         }
     }
     @objc private func pictureInPictureTimingChanged() {
