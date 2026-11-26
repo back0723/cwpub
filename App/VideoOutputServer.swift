@@ -70,6 +70,8 @@ final class VideoOutputServer {
         var carModeReadySent = false
         /// 已经给 CarMode 页面发过「可以出图」的 ready 状态（页面靠 phase=ready 才会画图）。
         var carModeStateReadySent = false
+        /// 页面为了音频单独开的那条 WebSocket（audioClaim 成功后的通道）：只收 PCM，不收画面。
+        var audioOnly = false
         let secure: Bool
         init(connection: NWConnection, secure: Bool) {
             self.connection = connection; self.secure = secure
@@ -139,6 +141,9 @@ final class VideoOutputServer {
     private var performance: BrowserPerformance = .auto
     private var showTouches = false
     private var browserAudio = false
+    /// CarMode 页面独立音频通道的钥匙：state 里带出去，页面开第二条 WebSocket 用 audioClaim 换回来。
+    /// 不这样做的话 PCM 和每秒上兆的 JPEG 挤同一条 socket，车机 JS 线程一画图音频就顿（"音乐卡卡的"）。
+    private let carModeAudioKey = UUID().uuidString
     /// Diagnostic latch: log once when the first audio packet actually reaches a page.
     private var audioForwarded = 0
     private var hls: CarPlayHLS?
@@ -169,7 +174,7 @@ final class VideoOutputServer {
             guard let self else { return }
             self.queue.async {
                 for client in Array(self.clients.values) {
-                    if client.carMode, client.usesJPEG, client.mode == .webSocket {
+                    if client.carMode, client.usesJPEG, client.mode == .webSocket, !client.audioOnly {
                         // CarMode 页面的兼容画面就是 tag 3 + 一整张 JPEG，页面按图片自然尺寸画。
                         // 页面只有 phase=ready 才会把图画出来，所以第一张图前面补一个 ready。
                         if !client.carModeStateReadySent {
@@ -242,9 +247,20 @@ final class VideoOutputServer {
             // 原来这里还卡了一道 self.browserAudio：JPEG 兼容画面下这个标志偶尔是 false，
             // 结果音频永远送不出去。真正该判的是"页面要不要"。
             guard let self else { return }
+            // 独立音频通道在就只喂它：主连接上每秒上兆的 JPEG 会把音频块挤在后面，车机听起来一卡一卡。
+            var hasCarModeAudioChannel = false
+            for client in self.clients.values where client.carMode && client.audioOnly && client.mode == .webSocket {
+                hasCarModeAudioChannel = true; break
+            }
             var delivered = 0
             for client in Array(self.clients.values) where client.wantsAudio && client.streamStarted
-                && client.pendingBytes < self.skipPendingBytes {
+                && client.pendingBytes < (client.audioOnly ? 1_048_576 : self.skipPendingBytes) {
+                if client.carMode, client.audioOnly, client.mode == .webSocket {
+                    self.sendWebSocket(carModeWire, opcode: 2, to: client)
+                    delivered += 1
+                    continue
+                }
+                if client.carMode, hasCarModeAudioChannel { continue }
                 self.sendWebSocket(client.carMode ? carModeWire : wire, opcode: 2, to: client)
                 delivered += 1
             }
@@ -596,14 +612,24 @@ final class VideoOutputServer {
             let display = BrowserDisplay(width: w, height: h, screenWidth: w, screenHeight: h,
                 devicePixelRatio: ratio.isFinite ? min(max(ratio, 0.5), 5) : 1,
                 refreshHz: 0, supportsH265: false, fullscreen: false, peer: client.peer)
-            if client.display?.width != w || client.display?.height != h {
+            let viewportChanged = client.display?.width != w || client.display?.height != h
+            if viewportChanged {
                 onLog?("\(client.peer) 页面视口 \(w)×\(h)")
             }
             client.display = display
             client.awaitingDisplay = false
             updatePrimaryDisplay(changed: client.id)
-            // 页面只在 phase 为 idle/failed 时才显示「开始投屏」按钮，所以这里必须保持 idle。
-            sendCarModeState("idle", message: "点「开始投屏」开始", to: client)
+            // 页面只在 phase 为 idle/failed 时才显示「开始投屏」按钮，所以还没开流时必须保持 idle。
+            // 但【正在投屏时绝不能回 idle】：车机点全屏/改版式都会重新上报视口，回了 idle 页面就把
+            // 画面清掉、音频也 reset，而下一张图又要等 ready 状态 —— 这就是"全屏就不出画面"。
+            if viewportChanged {
+                if client.streamStarted || client.usesJPEG {
+                    client.carModeStateReadySent = false
+                    sendCarModeState("ready", message: "正在显示 CarPlay", to: client)
+                } else {
+                    sendCarModeState("idle", message: "点「开始投屏」开始", to: client)
+                }
+            }
         case "start":
             guard client.carMode else { break }
             onLog?("\(client.peer) 在车机页面上点了「开始投屏」")
@@ -617,8 +643,10 @@ final class VideoOutputServer {
             if parameters.isComplete { jpegEncoder.configure(parameters: parameters) }
             onKeyframeRequest?("\(client.peer)：CarMode 兼容画面")
             sendJSON(["type": "state", "phase": "connecting", "message": "正在准备兼容画面",
-                      "epoch": client.carModeEpoch, "audio": browserAudio, "audioKey": NSNull(),
+                      "epoch": client.carModeEpoch, "audio": browserAudio, "audioKey": carModeAudioKey,
                       "refitAvailable": true, "jpeg": true], to: client)
+            // 页面可能刚被全屏/版式变化重置过画面，重新走一遍"第一张图之前先给 ready"。
+            client.carModeStateReadySent = false
             onStartRequest?(client.peer)
         case "touch":
             guard client.carMode else { break }
@@ -632,6 +660,24 @@ final class VideoOutputServer {
             let active = !(action == "up" || action == "cancel")
             client.touching = active
             onTouches?(client.id.uuidString, active ? [point] : [])
+        case "audioClaim":
+            // CarMode 页面为音频单独开的第二条 WebSocket（和 CarMode 2.5 一样的独立通道）。
+            // 认到钥匙就把这条连接变成"只收 PCM"的通道，主连接不再夹音频。
+            guard let key = object["key"] as? String, key == carModeAudioKey else {
+                onLog?("\(client.peer) 独立音频通道握手被拒（key 不匹配）")
+                break
+            }
+            client.carMode = true
+            client.audioOnly = true
+            // 页面重连会再开一条新的音频通道，旧的那条必须收掉，否则同一路 PCM 播两遍（重音/回声）。
+            for other in Array(clients.values) where other.audioOnly && other.id != client.id {
+                close(other, reason: nil)
+            }
+            client.streamStarted = true
+            client.wantsAudio = true
+            client.awaitingDisplay = false
+            sendJSON(["type": "audioReady"], to: client)
+            onLog?("\(client.peer) 独立音频通道已接通（PCM 走单独一条 WebSocket）")
         case "sound":
             guard client.carMode else { break }
             let enabled = object["enabled"] as? Bool == true
@@ -907,6 +953,8 @@ final class VideoOutputServer {
         // JPEG viewers receive complete pictures through jpegEncoder.onJPEG instead of these
         // H.264 fragments; feeding both would waste bandwidth and confuse the page.
         if client.usesJPEG { return }
+        // 独立音频通道只走 PCM，一个字节画面都不要往里塞。
+        if client.audioOnly { return }
         if !client.waitingForIDR, (client.mode == .raw || client.streamStarted) {
             if client.skippingToIDR {
                 guard keyframe, client.pendingBytes < skipPendingBytes / 2 else { return }
@@ -1001,7 +1049,7 @@ final class VideoOutputServer {
     private func sendCarModeState(_ phase: String, message: String, to client: Client) {
         sendJSON(["type": "state", "phase": phase, "message": message,
                   "epoch": client.carModeEpoch, "audio": browserAudio,
-                  "audioKey": NSNull(), "refitAvailable": true], to: client)
+                  "audioKey": carModeAudioKey, "refitAvailable": true], to: client)
     }
 
     /// 这台车机解不了这路 H.264：让页面切到兼容画面，服务端也改用整张 JPEG（tag 3）。
@@ -1012,7 +1060,7 @@ final class VideoOutputServer {
         client.streamStarted = true
         if parameters.isComplete { jpegEncoder.configure(parameters: parameters) }
         sendJSON(["type": "state", "phase": "ready", "message": "已切换到兼容画面",
-                  "epoch": client.carModeEpoch, "audio": browserAudio, "audioKey": NSNull(),
+                  "epoch": client.carModeEpoch, "audio": browserAudio, "audioKey": carModeAudioKey,
                   "refitAvailable": true, "jpeg": true], to: client)
         onLog?("\(client.peer) 5 秒没画出第一帧，改用兼容画面（JPEG）")
         onKeyframeRequest?("\(client.peer)：兼容画面需要关键帧")
@@ -1132,6 +1180,12 @@ final class VideoOutputServer {
         guard clients.removeValue(forKey: client.id) != nil else { return }
         if client.mode == .webSocket { updatePrimaryDisplay() }
         if client.touching { onTouches?(client.id.uuidString, []); client.touching = false }
+        // 页面主连接没了，为它单开的音频通道也没有意义了，一起收掉。
+        if client.carMode, !client.audioOnly {
+            for other in Array(clients.values) where other.audioOnly {
+                close(other, reason: nil)
+            }
+        }
         if let reason { report(reason) }
         else if client.mode != .request { report("\(client.peer) 已断开（剩余 \(viewerCount) 台）") }
     }
