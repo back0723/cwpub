@@ -156,9 +156,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private lazy var pictureInPicture = CarPlayPictureInPicture(surface: videoSurface)
     private let keepAlive = BackgroundKeepAlive()
     private let keepAliveSwitch = UISwitch()
-    /// 只保留两种输出：浏览器、CarLife。AirPlay / 台铃 / 九号 / 极核 已全部移除。
-    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife"])
-    /// rawValue 保持不变（历史偏好里可能存着 2…5，rawValue 初始化失败即回落 browser）。
+    /// 三种输出：浏览器、CarLife、AirPlay。台铃 / 九号 / 极核 已整体移除。
+    private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife", "AirPlay"])
+    /// rawValue 保持不变（历史偏好里可能存着 3…5，rawValue 初始化失败即回落 browser）。
     private enum HeadUnitOutput: Int {
         case browser, carLife, airPlay
     }
@@ -417,8 +417,36 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         carLifeSettings.addAction(UIAction { [weak self] _ in self?.revealSettings(output: true) }, for: .touchUpInside)
         carLifeCard.addArrangedSubview(carLifeSettings)
         stack.addArrangedSubview(carLifeCard)
-        // AirPlay / 台铃 / 九号 / 极核 四种输出已整体移除：卡片不再创建，也不再加入主界面。
-        // 相关字段、状态标签与历史预设保留为不可达代码，避免牵连其它模块，界面上不会再出现。
+
+        configureConnectionCard(airPlayCard, title: "AirPlay 连接", symbol: "airplayvideo", color: .systemBlue,
+            instructions: "接收设备与 iPhone 连同一 Wi-Fi。启动 CarPlay 后，可在这里选择设备。",
+            status: airPlayCardStatus)
+        let routeTitle = UILabel()
+        routeTitle.text = "选择 AirPlay 设备"
+        routeTitle.font = .preferredFont(forTextStyle: .body)
+        routeTitle.adjustsFontForContentSizeCategory = true
+        routeTitle.numberOfLines = 0
+        airPlayRoutePicker.prioritizesVideoDevices = true
+        airPlayRoutePicker.tintColor = .systemBlue
+        airPlayRoutePicker.activeTintColor = .systemGreen
+        airPlayRoutePicker.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.1)
+        airPlayRoutePicker.layer.cornerRadius = 14
+        airPlayRoutePicker.accessibilityLabel = routeTitle.text
+        routeTitle.isAccessibilityElement = false
+        NSLayoutConstraint.activate([
+            airPlayRoutePicker.widthAnchor.constraint(equalToConstant: 44),
+            airPlayRoutePicker.heightAnchor.constraint(equalToConstant: 44)
+        ])
+        let routeRow = UIStackView(arrangedSubviews: [routeTitle, airPlayRoutePicker])
+        routeRow.alignment = .center
+        routeRow.spacing = 8
+        airPlayCard.addArrangedSubview(routeRow)
+        airPlayRetryButton.configuration = .tinted()
+        airPlayRetryButton.configuration?.title = "重试 AirPlay"
+        airPlayRetryButton.addAction(UIAction { [weak self] _ in self?.startAirPlayTransport() }, for: .touchUpInside)
+        airPlayRetryButton.isHidden = true
+        airPlayCard.addArrangedSubview(airPlayRetryButton)
+        stack.addArrangedSubview(airPlayCard)
 
         inlineVideoContainer.isHidden = true
         inlineVideoContainer.clipsToBounds = true
@@ -1876,9 +1904,9 @@ extension ReceiverViewController {
         let previousOutput = defaults.object(forKey: "headUnitOutput") as? Int
         let legacyOutput: HeadUnitOutput = defaults.bool(forKey: "carLifeEnabled") ? .carLife : .browser
         let migratedOutput = previousOutput.map { $0 == 1 ? HeadUnitOutput.carLife : .browser } ?? legacyOutput
-        // 老偏好里可能存着已删掉的输出（2…5），rawValue 初始化会失败，统一夹回两种合法输出。
+        // 老偏好里可能存着已删掉的输出（3…5），rawValue 初始化会失败，回落 migratedOutput。
         let savedMode = savedOutput.flatMap(HeadUnitOutput.init(rawValue:)) ?? migratedOutput
-        headUnitOutput.selectedSegmentIndex = (savedMode == .carLife ? HeadUnitOutput.carLife : .browser).rawValue
+        headUnitOutput.selectedSegmentIndex = savedMode.rawValue
         headUnitOutput.addTarget(self, action: #selector(headUnitOutputChanged), for: .valueChanged)
         carLifeAddressField.text = defaults.string(forKey: "carLifeAddress")
         carLifeAddressField.keyboardType = .decimalPad
@@ -2026,7 +2054,9 @@ extension ReceiverViewController {
                     .guide("浏览器", icon: ("globe", .systemTeal),
                            "车机连同一个 Wi-Fi。在「当前输出」选浏览器，启动 CarPlay，再用车机打开首页显示的 HTTP 地址。"),
                     .guide("CarLife", icon: ("car.fill", .systemIndigo),
-                           "先打开车机上的 CarLife，再在「当前输出」选 CarLife 并启动 CarPlay。只有浏览器和 CarLife 两种输出。")
+                           "先打开车机上的 CarLife，再在「当前输出」选 CarLife 并启动 CarPlay。当前输出共三种：浏览器、CarLife、AirPlay。"),
+                    .guide("AirPlay", icon: ("airplayvideo", .systemBlue),
+                           "接收设备与 iPhone 连同一 Wi-Fi。在「当前输出」选 AirPlay，启动 CarPlay 后在 AirPlay 连接卡里挑设备。")
                 ]),
                 SettingsSection("3. 常见问题", [
                     .guide("卡在正在连接", icon: ("arrow.clockwise", .systemOrange),
