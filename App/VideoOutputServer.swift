@@ -467,6 +467,10 @@ final class VideoOutputServer {
                 } else {
                     client.jpegFormatPending = true
                 }
+                // CarPlay 只在开流那一刻发一次 IDR，之后的画面全是 P 帧。老浏览器接上时往往早就
+                // 错过了那张 IDR，JPEG 兼容解码器也就没有可解码的第一张图（黑屏 + 首帧超时的根因）。
+                // 兼容观看端一接入就向 iPhone 要一个新关键帧，让解码器立刻拿到完整的 IDR+SPS/PPS。
+                onKeyframeRequest?("\(client.peer)：JPEG 兼容观看端接入")
                 return
             }
             sendJSON(["type": "status", "text": "已连接 CarWithin，正在等待关键帧"], to: client)
@@ -577,6 +581,9 @@ final class VideoOutputServer {
             if codec.parameterSet(unit) != nil { if parameters.absorb(unit) { changed = true }; continue }
             if codec.isRandomAccess(unit) { keyframe = true }
             picture.append(unit)
+        }
+        if changed {
+            onLog?("浏览器参数集：SPS \(parameters.sps?.count ?? 0) 字节 / PPS \(parameters.pps?.count ?? 0) 字节，完整=\(parameters.isComplete)")
         }
         if changed, parameters.isComplete {
             let previous = format?.codecString
