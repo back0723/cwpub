@@ -2807,7 +2807,7 @@ extension ReceiverViewController {
         version.textColor = .secondaryLabel
         version.adjustsFontForContentSizeCategory = true
         let introduction = UILabel()
-        introduction.text = "在这台 iPhone 上启动 CarPlay，把画面和声音送到车机：浏览器、CarLife（无线）或 AirPlay。"
+        introduction.text = "在这台 iPhone 上启动 CarPlay，把画面和声音送到车机：浏览器、CarLife 或 AirPlay。"
         introduction.font = .preferredFont(forTextStyle: .subheadline)
         introduction.textColor = .secondaryLabel
         introduction.adjustsFontForContentSizeCategory = true
