@@ -1911,7 +1911,7 @@ extension ReceiverViewController {
                     : "选择比例后按分辨率档位计算尺寸，短边至少 320 像素，实际值见下方。2K/4K 会增加发热和带宽。")
                     + (!followsCarScreen ? "\n此输出受 1920×1080 限制，较长的竖屏比例以实际尺寸为准。" : "")
                     + "\n下次启动：\(plan.width)×\(plan.height) · \(plan.fps) FPS · \(plan.codec.displayName)", size),
-                SettingsSection(footer: "帧率可选 25 / 30 / 60 FPS，默认 30（「自动」也走 30）。25 更省带宽，60 需要车机硬解和 Wi-Fi 都跟得上；跟不上会自动降档重启。", [
+                SettingsSection(footer: "帧率可选 25 / 30 / 60 FPS，默认 30（「自动」也走 30）。选哪个就按哪个输出，不会再被夹回 30；卡顿时只会降分辨率重启，不会偷偷压低帧率。60 需要车机硬解和 Wi-Fi 都跟得上。", [
                     .control("帧率", icon: ("gauge.with.dots.needle.67percent", .systemGreen), frameRateControl)
                 ]),
                 SettingsSection(footer: "画面持续卡顿时，自动以更轻的画面重启 Carplay（只降到 720P，不动你选的帧率），每次连接最多两次。", [
