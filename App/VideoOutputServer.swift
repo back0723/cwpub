@@ -23,7 +23,7 @@ enum BrowserPerformance: String, CaseIterable {
 /// Serves a browser-based CarPlay view over HTTP and WebSocket to several LAN devices at once.
 /// It also keeps /video.h264 (raw Annex-B, whichever codec CarPlay sends) for diagnostic clients.
 final class VideoOutputServer {
-    private enum Mode { case request, raw, webSocket }
+    private enum Mode { case request, raw, webSocket, mjpeg }
     private final class Client {
         let id = UUID()
         let connection: NWConnection
@@ -57,6 +57,11 @@ final class VideoOutputServer {
         var usesAudioClock = false
         /// Last User-Agent reported by the page; used for diagnosing old head-unit browsers.
         var userAgent: String?
+        /// MJPEG 观看端：上一次 part 还没写完时只留最新一帧（newest wins），不做积压。
+        var mjpegPending: Data?
+        var mjpegWriting = false
+        /// 页面声明"画面走 /mjpeg"：这条 WebSocket 就不再收 JPEG 帧，只管触控/声音/尺寸。
+        var mjpegPage = false
         let secure: Bool
         init(connection: NWConnection, secure: Bool) {
             self.connection = connection; self.secure = secure
@@ -124,15 +129,17 @@ final class VideoOutputServer {
     /// Decodes H.264/H.265 into standalone JPEGs for old browsers that cannot survive without
     /// repeated IDR keyframes (Chromium 53 head units). Shared by all JPEG viewers.
     // 车机是 1GB RAM 的安卓 4.2：每帧 JPEG 的尺寸和帧率直接决定它卡不卡。
-    // 页面用 <img> 换图（不再是 canvas 全屏 blit）之后，1280 宽 + 0.55 质量能吃下，
-    // 质量给高一点，文字才不会糊成一团。
-    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.55, maximumFPS: 15)
+    // CarMode 2.5 在这块屏上是 1436×640 / 30 fps 的 MJPEG，这里按同一组数走；
+    // 页面用 multipart/x-mixed-replace 的 <img> 直接吃流，不再走 WebSocket 一帧一帧地塞 blob。
+    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.6, maximumFPS: 30, maximumWidth: 1436)
     var onAirPlayReady: ((UUID) -> Void)?
     /// 观看端上报的浏览器标识，用来判断是不是「老车机浏览器」（Chromium < 60）。
     var onViewerUserAgent: ((String) -> Void)?
 
     private var viewerCount: Int { clients.values.filter { $0.mode != .request }.count }
-    private var hasJPEGViewers: Bool { clients.values.contains { $0.usesJPEG && $0.mode == .webSocket } }
+    private var hasJPEGViewers: Bool {
+        clients.values.contains { $0.usesJPEG && ($0.mode == .webSocket || $0.mode == .mjpeg) }
+    }
     private static func nowUs() -> UInt64 { DispatchTime.now().uptimeNanoseconds / 1000 }
 
     init() {
@@ -145,10 +152,15 @@ final class VideoOutputServer {
         jpegEncoder.onJPEG = { [weak self] jpeg in
             guard let self else { return }
             self.queue.async {
-                var packet = Data([BrowserPacket.jpeg.rawValue])
-                packet.append(jpeg)
-                for client in Array(self.clients.values) where client.usesJPEG && client.mode == .webSocket {
-                    self.sendWebSocket(packet, opcode: 2, to: client)
+                for client in Array(self.clients.values) {
+                    switch client.mode {
+                    case .mjpeg: self.pushMJPEG(jpeg, to: client)
+                    case .webSocket where client.usesJPEG && !client.mjpegPage:
+                        var packet = Data([BrowserPacket.jpeg.rawValue])
+                        packet.append(jpeg)
+                        self.sendWebSocket(packet, opcode: 2, to: client)
+                    default: break
+                    }
                 }
             }
         }
@@ -309,7 +321,7 @@ final class VideoOutputServer {
             switch client.mode {
             case .request: self.handleHTTPRequest(client)
             case .webSocket: self.handleWebSocketInput(client)
-            case .raw: client.buffer.removeAll()
+            case .raw, .mjpeg: client.buffer.removeAll()
             }
             if complete || error != nil { self.close(client, reason: nil); return }
             if self.clients[client.id] != nil { self.receive(client) }
@@ -356,6 +368,21 @@ final class VideoOutputServer {
             sendRaw("HTTP/1.1 200 OK\r\nContent-Type: \(type)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", to: client)
             report("\(client.peer) 已连接原始视频流（共 \(viewerCount) 台）")
             replayGOP(to: client)
+        case "/mjpeg", "/mjpg", "/stream.jpg":
+            // CarMode 2.5 的做法：车机上的 <img src="/mjpeg"> 直接吃一条 multipart/x-mixed-replace
+            // 的 JPEG 流，解码、换图、缩放全在浏览器自己的图像解码线程里做，页面脚本一帧都不用碰。
+            guard viewerCount < Self.maximumViewers else { reject(client, status: "503 Service Unavailable"); return }
+            client.mode = .mjpeg
+            client.usesJPEG = true
+            client.waitingForIDR = false
+            client.streamStarted = true
+            client.browserReady = true
+            sendRaw("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=\(Self.mjpegBoundary)\r\n"
+                    + "Cache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nConnection: close\r\n\r\n", to: client)
+            report("\(client.peer) 已接入 MJPEG 兼容画面（共 \(viewerCount) 台）")
+            jpegEncoder.configure(parameters: parameters)
+            // 兼容观看端一接入就要一个新关键帧：CarPlay 只在开流时发一次 IDR，晚了就没有完整的图可解。
+            onKeyframeRequest?("\(client.peer)：MJPEG 观看端接入")
         case "/stream", "/oxp/v0":
             guard viewerCount < Self.maximumViewers else { reject(client, status: "503 Service Unavailable"); return }
             upgradeWebSocket(client, headers: headers)
@@ -446,6 +473,9 @@ final class VideoOutputServer {
         case "ready":
             if !client.browserReady, let id = object["viewer"] as? String { client.viewerID = UUID(uuidString: id) }
             client.browserReady = true; client.waitingForIDR = true; client.streamStarted = false; client.skippingToIDR = false
+            // 页面用 /mjpeg 那条 multipart 流出图（CarMode 的做法），这条 WebSocket 只负责触控、
+            // 声音、尺寸上报和状态，别再往上面堆一遍 JPEG 帧，白占一倍无线带宽。
+            client.mjpegPage = object["picture"] as? String == "mjpeg"
             let decoder = object["decoder"] as? String
             let webCodecs = decoder == "webcodecs"
             let wantsJPEG = decoder == "jpeg"
@@ -790,6 +820,35 @@ final class VideoOutputServer {
     }
 
     private func sendRaw(_ text: String, to client: Client) { send(Data(text.utf8), to: client) }
+
+    // MARK: MJPEG
+
+    private static let mjpegBoundary = "carwithinpicture"
+    /// 每帧一个 part。车机没画完上一帧时只换掉待发的那一帧（newest wins），
+    /// 这样跟不上的一刻是"少几帧"，而不是"越积越慢、越看越延迟"。
+    private func pushMJPEG(_ jpeg: Data, to client: Client) {
+        guard clients[client.id] != nil, client.mode == .mjpeg else { return }
+        if client.mjpegWriting { client.mjpegPending = jpeg; return }
+        client.mjpegWriting = true
+        writeMJPEG(jpeg, to: client)
+    }
+
+    private func writeMJPEG(_ jpeg: Data, to client: Client) {
+        var part = Data("--\(Self.mjpegBoundary)\r\nContent-Type: image/jpeg\r\nContent-Length: \(jpeg.count)\r\n\r\n".utf8)
+        part.append(jpeg)
+        part.append(Data("\r\n".utf8))
+        client.pendingBytes += part.count
+        client.connection.send(content: part, completion: .contentProcessed { [weak self, weak client] error in
+            guard let self, let client else { return }
+            client.pendingBytes = max(0, client.pendingBytes - part.count)
+            client.mjpegWriting = false
+            if error != nil { self.close(client, reason: nil); return }
+            if let next = client.mjpegPending {
+                client.mjpegPending = nil
+                self.pushMJPEG(next, to: client)
+            }
+        })
+    }
 
     private func reject(_ client: Client, status: String) {
         let body = status.hasPrefix("503") ? "最多支持 \(Self.maximumViewers) 台设备同时观看" : "请求不受支持"
