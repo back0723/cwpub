@@ -2305,15 +2305,15 @@ extension ReceiverViewController {
         page("声音") { [unowned self] in
             // 声音只有一种输出：随画面传输（Wi‑Fi）。
             // CarLife 模式走伴音通道由车机播放；浏览器模式由浏览器播放。未连接时静默，不回落 iPhone。
-            var duckRow = SettingsRow.control("导航播报时音乐降低 50%", icon: ("speaker.wave.1.fill", .systemOrange), navDuckingSwitch)
-            duckRow.subtitle = { "导航播报期间把音乐压到一半，播报结束自动恢复；关闭则音量不变。" }
+            var duckRow = SettingsRow.control("导航播报时音乐压低 75%（约 −12 dB）", icon: ("speaker.wave.1.fill", .systemOrange), navDuckingSwitch)
+            duckRow.subtitle = { "导航播报期间把音乐压到 1/4，播报结束（含 3 秒尾巴）自动恢复；关闭则音量不变。" }
             var callRow = SettingsRow.control("声明 CarPlay 通话能力（电话进车机）", icon: ("phone.fill", .systemRed), telephonySwitch)
             callRow.subtitle = { "默认关闭：/info 里不写 telephony、也不发电话键，iPhone 只把音乐/导航送到车机，电话与微信通话留在手机本身或车机蓝牙，画面不受影响。打开后恢复历史那套完整声明（音乐同样有声），但通话会被拉进 CarPlay，而本机不供麦，通话双方听不到。" }
             let sections = [
                 SettingsSection(footer: "声音随画面走 Wi‑Fi：CarLife 模式由车机播放，浏览器模式由浏览器播放；未连接时保持静默，不回落 iPhone。", [
                     .info("随画面传输（Wi‑Fi）", "解码后的 PCM 随画面送到接收端，连接建立后自动出声，断开时自动暂停音乐。")
                 ]),
-                SettingsSection(footer: "只影响音乐随画面传输到接收端时的音量。", [duckRow]),
+                SettingsSection(footer: "只压低送到车机通道 3 的音乐 PCM 本身，不依赖车机支持 setVolume；导航播报走车机通道 4。", [duckRow]),
                 SettingsSection(footer: "两个档位：关闭=只播媒体、通话不接管；打开=完整声明（音乐有声但通话进车机）。改完需重启 CarPlay。", [callRow])
             ]
             return sections
