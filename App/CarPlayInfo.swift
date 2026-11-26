@@ -34,11 +34,8 @@ enum CarPlayInfo {
     /// 是否在 /info 里声明通话能力（telephony 条目 + HID 电话键），两者必须同进同退。
     static var declaresTelephony: Bool { telephonyCompat }
 
-    /// 25-60 in steps of 5 (round half up), as the iPhone expects for maxFPS.
-    static func sanitizedFPS(_ fps: Int) -> Int {
-        let clamped = min(60, max(25, fps))
-        return ((clamped - 25) + 2) / 5 * 5 + 25
-    }
+    /// 原样透传（1-60），不再取整到 5 的倍数，避免选了 60 却报 60 以下。
+    static func sanitizedFPS(_ fps: Int) -> Int { return min(60, max(1, fps)) }
 
     static func build(_ config: ReceiverConfiguration) -> [String: Any] {
         let area: [String: Any] = ["widthPixels": config.width, "heightPixels": config.height, "originXPixels": 0, "originYPixels": 0]
