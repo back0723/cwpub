@@ -124,8 +124,9 @@ final class VideoOutputServer {
     /// Decodes H.264/H.265 into standalone JPEGs for old browsers that cannot survive without
     /// repeated IDR keyframes (Chromium 53 head units). Shared by all JPEG viewers.
     // 车机是 1GB RAM 的安卓 4.2：每帧 JPEG 的尺寸和帧率直接决定它卡不卡。
-    // 30fps 原尺寸它扛不住，这里降到 15fps + 1280 宽上限（页面 canvas 再放大到满屏）。
-    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.45, maximumFPS: 15)
+    // 页面用 <img> 换图（不再是 canvas 全屏 blit）之后，1280 宽 + 0.55 质量能吃下，
+    // 质量给高一点，文字才不会糊成一团。
+    private let jpegEncoder = BrowserJPEGEncoder(quality: 0.55, maximumFPS: 15)
     var onAirPlayReady: ((UUID) -> Void)?
     /// 观看端上报的浏览器标识，用来判断是不是「老车机浏览器」（Chromium < 60）。
     var onViewerUserAgent: ((String) -> Void)?
