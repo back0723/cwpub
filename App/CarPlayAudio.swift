@@ -633,31 +633,17 @@ private final class NativeMicrophone {
             if callInProgress {
                 let recordable = session.category == .playAndRecord || session.category == .record
                 if !recordable {
-                    // 真机日志实锤：普通电话和微信通话时，后台保活静音播放器 + 通话混音会把本 App
-                    // 的会话留在 .playback（只播放、不可录）。旧逻辑在这里直接 return，上行麦克风
-                    // 从头到尾没启动 → 对方永远听不到你说话（21:08:45「会话不可录」）。
-                    // 新逻辑：会话不可录时主动切到 .playAndRecord 再装 tap。
-                    // · 切成功 → 上行恢复（build39 曾实测麦克风启动成功）。
-                    // · 系统独占麦克风拒绝切换 → 如实放弃，不中断通话本身。
-                    // 已经可录的会话（微信 VoIP 常如此）不进来这里，不会被顶断。
-                    do {
-                        try session.setCategory(.playAndRecord, mode: .default,
-                                                options: [.defaultToSpeaker, .allowBluetooth])
-                        try session.setActive(true)
-                        if let builtIn = session.availableInputs?.first(where: { $0.portType == .builtInMic }) {
-                            try? session.setPreferredInput(builtIn)
-                        }
-                        onLog?("通话中会话已从不可录切到可录，启动上行麦克风")
-                    } catch {
-                        if !loggedWaitingForAudio {
-                            loggedWaitingForAudio = true
-                            onLog?("麦克风无法启动：通话中切可录会话被系统拒绝（\(error.localizedDescription)），稍后重试")
-                        }
-                        onStartFailed?()
-                        return
+                    // 【绝不中途切类别】通话进行中 setCategory(.playAndRecord) 会把系统通话/微信的
+                    // 通道路由抢走，历史真机日志直接 `!int` 并顶断 CarLife（画面断开）。
+                    // 本版的可录会话已在启动阶段（BackgroundKeepAlive 读到 telephonyCompat）摆好，
+                    // 正常不会走到这里；真走到了就如实放弃上行，保住通话和画面。
+                    if !loggedWaitingForAudio {
+                        loggedWaitingForAudio = true
+                        onLog?("会话不可录（\(session.category.rawValue)），为不断开通话/画面，本次通话放弃上行")
                     }
+                    return
                 }
-                // 会话现在可录：直接装 tap，不再改类别。
+                // 会话已可录：直接装 tap，不改任何类别/选项/路由。
             } else {
                 // 没有其它 App 占用：正常建立可录会话。
                 if session.category != .playAndRecord || session.categoryOptions.contains(.mixWithOthers) {
