@@ -168,25 +168,13 @@ final class CarPlayAudio {
                 return
             }
             onPCM?(buffer)
-            // 【上行交给手机系统通话】本方案 microphonePort 恒 nil，microphone 永远不会创建，
-            // 下面的启动块是历史兼容代码（若未来改回车机采麦可复用），当前不会执行。
-            // 车机不再采麦、不碰 AVAudioSession；用手机本机麦克风走系统通话即可双向。
+            // 【上行改走车机麦】通话流一进来就建好「车机 16 kHz PCM → 上行格式」的链路，
+            // 等 CarLife 通道 5 把车机麦的 PCM 送上来（NativeReceiver 收到 0x58001 就喂进来）。
+            // 不再尝试 iPhone 麦：通话中会话是 .playback，录不了；切类别会把通话顶断。
             if let microphone, isVoice, !microphoneStarted {
                 microphoneStarted = true
                 microphone.onLog = onLog
-                microphone.onStartFailed = { [weak self] in
-                    guard let self, self.active, self.microphoneRetries < 3 else { return }
-                    self.microphoneRetries += 1
-                    let delay = self.microphoneRetries
-                    self.onLog?("上行麦克风将在 \(delay) 秒后重试（第 \(self.microphoneRetries)/3 次）")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Double(delay)) { [weak self] in
-                        guard let self, self.active else { return }
-                        // 保持 microphoneStarted = true：receive() 每帧都会检查这个标志，
-                        // 若置回 false 会导致下一帧再触发一次 start()，重复装 tap / 发双份音频。
-                        microphone.start()
-                    }
-                }
-                DispatchQueue.main.async { microphone.start() }
+                DispatchQueue.main.async { microphone.startForVehicle() }
             }
             // 只有在车机页面上真的有人在要声音时才转发；没人要就让下面的本地播放跑起来，
             // 不然这条音频包会被转发到一个不存在的听众那里，手机和车机同时没声音。
@@ -411,6 +399,19 @@ final class CarPlayAudio {
         #if os(iOS)
         renderQueue.async { deactivateSessionIfIdle(releaseSpeakerOverride: true) }
         #endif
+    }
+    private var loggedVehicleMicNoLink = false
+    /// 车机麦 PCM 入口：CarLife 通道 5（id 0x58001）送来的 16 kHz 单声道 PCM16。
+    /// 由 NativeReceiver 转发进来，最终经 MicrophonePacketizer 发回 iPhone 的 dataPort。
+    func feedVehicleMicrophone(_ pcm: Data) {
+        guard let microphone else {
+            if !loggedVehicleMicNoLink {
+                loggedVehicleMicNoLink = true
+                onLog?("车机麦 PCM 已到达，但当前通话流没有上行通道（可能通话已结束）")
+            }
+            return
+        }
+        microphone.feedVehiclePCM(pcm)
     }
     private func stopOnQueue() {
         guard active else { return }; active = false
@@ -725,6 +726,55 @@ private final class NativeMicrophone {
     }
     private var loggedNoInput = false
     private var loggedFailure = false
+
+    // MARK: 车机麦（通话中唯一可行的上行来源）
+    // 1.7 实测结论：通话中 AVAudioSession 是 .playback（我们的保活占着），系统不允许我们录音；
+    // 一旦切 .playAndRecord 就把系统通话顶断（`!int` / 操作已中断）。也就是说「用 iPhone 麦」
+    // 在 CarPlay 通话架构里根本不成立 —— 上行只能由车机硬件麦提供（真 CarPlay 就是这么设计的）。
+    // 所以这里彻底不碰 AVAudioSession/AVAudioEngine（也避开 inputNode 断言崩溃），
+    // 只把车机经 CarLife 通道 5 送来的 16 kHz 单声道 PCM16 转成上行格式发回 iPhone。
+    private var vehicleMode = false
+    private var vehiclePackets = 0
+    func startForVehicle() {
+        guard active, !vehicleMode else { return }
+        vehicleMode = true
+        guard let inputFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1),
+              let outputFormat = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1),
+              let conv = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            onLog?("车机麦上行：转换器不可用（16000 → \(rate)）——本次通话无上行")
+            return
+        }
+        converter = conv
+        if format.isOpus {
+            do { opusEncoder = try NativeOpusEncoder(rate: rate) }
+            catch {
+                onLog?("车机麦上行：Opus 编码器不可用（\(error.localizedDescription)）——本次通话无上行")
+                return
+            }
+        }
+        connection.start(queue: .main)
+        onLog?("车机麦上行已就绪：车机 16000 Hz → 上行 \(rate) Hz \(format.name)，不占用手机麦克风")
+    }
+    /// 车机 PCM 入口（16 kHz 单声道 16 bit 小端裸数据）。
+    func feedVehiclePCM(_ data: Data) {
+        guard vehicleMode, active else { return }
+        let frames = data.count / 2
+        guard frames > 0,
+              let inputFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(frames)),
+              let dst = buffer.floatChannelData?[0] else { return }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        data.withUnsafeBytes { raw in
+            let src = raw.bindMemory(to: Int16.self)
+            for index in 0..<frames { dst[index] = Float(Int16(littleEndian: src[index])) / 32768 }
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.active, self.vehicleMode else { return }
+            self.vehiclePackets += 1
+            if self.vehiclePackets == 1 { self.onLog?("车机麦上行：第 1 包已进入编码链路") }
+            self.send(buffer)
+        }
+    }
     static func permissionText() -> String {
         switch AVAudioSession.sharedInstance().recordPermission {
         case .granted: return "已允许"
