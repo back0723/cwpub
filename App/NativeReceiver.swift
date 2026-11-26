@@ -169,6 +169,13 @@ final class NativeReceiver {
         videoOutput.onRefitRequest = { [weak self] peer in
             DispatchQueue.main.async { self?.onBrowserRefit?(peer) }
         }
+        // 浏览器模式的通话上行：CarLife 那条“车机麦”在纯浏览器模式下根本不存在（页面开的是
+        // 车机自带浏览器，不是我们的 APK）。这里把页面用 getUserMedia 采到的 16 kHz 单声道
+        // PCM16（WebSocket 类型 7）喂进同一条上行编码链路，对方才听得到。
+        videoOutput.onBrowserMicrophone = { [weak self] pcm in
+            guard let self else { return }
+            self.queue.async { self.activeMedia?.feedVehicleMicrophone(pcm) }
+        }
     }
     func start(configuration: ReceiverConfiguration, identity: AccessoryIdentity, advertise: Bool = true,
                preferredViewer: UUID? = nil) {
@@ -419,6 +426,8 @@ final class NativeReceiver {
         // 【车机麦开关】通话一建立就请求车机开麦（通道 1 0x10024）。不发这条命令，车机的
         // AudioRecord 根本不会启动 —— 这就是之前「有硬件麦却零入站」的真因。
         carLife.startVehicleMicrophone()
+        // 浏览器模式下没有 CarLife，车机麦要靠页面自己采：让页面在通话期间开麦克风。
+        videoOutput.setPageMicrophone(true)
         // 【不要凭空续播】只认一条硬证据：通话前 8 秒内真的收到过音乐流（音乐没暂停才会有流）。
         // 以前这里用 assumedPlaying（默认 true，且会被 playPause/断开等路径写成 true），
         // 于是「本来根本没在放音乐」的情况也被判成“通话前在播” → 挂断自动发播放键，
@@ -440,6 +449,7 @@ final class NativeReceiver {
         CarPlayAudio.outputMuted = false
         // 通话结束：让车机停止采麦，释放车机硬件麦。
         carLife.stopVehicleMicrophone()
+        videoOutput.setPageMicrophone(false)
         guard wasPlayingBeforeCall, let media = activeMedia else {
             if !wasPlayingBeforeCall, activeMedia != nil {
                 log("通话结束：通话前音乐本来没在播，不发播放键（避免自己响起来）")
