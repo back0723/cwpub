@@ -118,6 +118,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var autoRestarts = 0
     /// 0 = normal, 1 = 30 FPS, 2 = also at most 720p. Raised by "自动重启" when a browser keeps hitching.
     private var lightLevel = 0
+    /// 主观看端是老车机浏览器（Chromium < 60，如 Chrome 53 / Crosswalk）。
+    /// 这类机器的 MediaCodec 扛不住 1080P60 的 High@4.2：实测 MSE 播放停滞 + 解码失败 3；
+    /// 1080P60 的码率也不是 2.4G Wi-Fi 能稳的。识别到就按 720P/30 出画面。
+    private var legacyBrowserCap = false
     private var restartingAutomatically = false
     private var pendingRestartReason: String?
     private let appearanceControl = ChoiceMenu(items: ReceiverConfiguration.Appearance.allCases.map(\.title))
@@ -558,6 +562,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self.toggleReceiver()
         }
         receiver.onBrowserStruggling = { [weak self] peer, reason in self?.browserStruggling(peer: peer, reason: reason) }
+        receiver.onBrowserUserAgent = { [weak self] ua in self?.browserUserAgent(ua) }
         receiver.onBrowserRefit = { [weak self] peer in
             guard let self else { return }
             self.log("车机（\(peer)）点了“按新尺寸重新适配”，按当前窗口尺寸重连 CarPlay")
@@ -737,6 +742,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         var width = portrait ? cap.height : cap.width, height = portrait ? cap.width : cap.height
         var capArea = cap.width * cap.height
         if lightLevel >= 2 { capArea = min(capArea, 1280 * 720) }
+        // 老车机浏览器（Chromium < 60）默认就按 720P 出，不再等它卡了才自动降。
+        if legacyBrowserCap { capArea = min(capArea, 1280 * 720) }
         // CarLife head units decode H.264 up to 1080p and usually ask for 30 FPS.
         if outputMode != .browser { capArea = min(capArea, 1920 * 1080) }
         if followsCarScreen, let screen {
@@ -760,6 +767,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         default: fps = screen.map { (1..<45).contains($0.refreshHz) ? 30 : 60 } ?? 60
         }
         if lightLevel >= 1 { fps = min(fps, 30) }
+        if legacyBrowserCap { fps = min(fps, 30) }
         if outputMode != .browser { fps = min(fps, 30) }
         var codec: VideoCodec
         switch codecControl.selectedSegmentIndex {
@@ -1712,6 +1720,28 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // 会话中途重启会让 iPhone 立刻 TEARDOWN，视频流永远起不来（CarMode 全程不重启）。
         log("画面参数变化：\(changes.joined(separator: "，"))（本次会话不重启，下次启动生效）")
     }
+    /// 观看端上报的浏览器标识：Chromium < 60 视为老车机浏览器，画面档位压到 720P/30。
+    /// 只改「下次启动生效」的计划，和会话中途不重启的规则一致。
+    private func browserUserAgent(_ ua: String) {
+        let chrome: Int
+        if let range = ua.range(of: "Chrome/"), let slash = Int(ua[range.upperBound...].prefix(while: { $0.isNumber })) {
+            chrome = slash
+        } else if ua.contains("Crosswalk/") {
+            chrome = 53
+        } else {
+            chrome = 0
+        }
+        let legacy = chrome > 0 && chrome < 60
+        guard legacy != legacyBrowserCap else { return }
+        legacyBrowserCap = legacy
+        if legacy {
+            let plan = planDisplay(for: reportedScreen)
+            log("老浏览器（Chromium \(chrome)）接入：画面计划改为 \(plan.width)×\(plan.height) @ \(plan.fps) FPS，重启 CarPlay 后生效")
+        } else {
+            log("老浏览器已断开：画面计划恢复常规档位，下次启动生效")
+        }
+    }
+
     private func browserStruggling(peer: String, reason: String) {
         log("浏览器 \(peer) 持续卡顿（\(reason)）")
         guard autoRestartSwitch.isOn, running, lightLevel < 2 else { return }
