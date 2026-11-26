@@ -19,20 +19,20 @@ enum CarPlayInfo {
 
     static func features(audio: Bool) -> UInt64 { audio ? 0x615653aee2 : 0x615653aee2 & ~UInt64(0x10004540a00) }
 
-    /// 固定开启：声明 100 telephony，但按官方 CarLife 的做法只声明输出、不声明输入。
-    /// 目标 = 音乐/导航/通话对方声音都走 CarPlay WiFi 从车机通道3/4出声；通话上行交给手机系统
-    /// （人对着手机说话，用手机本机麦克风），车机不采麦——这正是官方百度 CarLife 的通话模型。
-    /// 【风险/待真机验证】历史实测「telephony 输入写0 → 全程没声」曾出现，但那次是否同时动了
-    /// 其它流的输入无法确证。本次只把 telephony 一条输入置0，music/default 等流声明全部保留，
-    /// 媒体流102 与音频图应不受影响；若真机出现「只剩视频110、音乐也没声」，说明 iPhone 看书机
-    /// 有没有麦克风用的是更全局的信号，则此路不通，需回退到完整声明。
-    static var audioFormatsCompat: Bool { true }
-
-    /// 固定开启：通话由 CarPlay 接管（不再"不接管"）——麦克风上行 + voice 下行送车机，
-    /// 电话键保留，CarPlay 当第二屏能点拨打/接听，按键只上报给 iPhone 由它执行通话。
-    static var callFreeCarPlay: Bool { true }
-    /// 仅表示当前是否为完整声明档，不再驱动任何拒接/静音分支。
-    static var callFreeActive: Bool { audioFormatsCompat && callFreeCarPlay }
+    /// 设置 → CarPlay → 声音 里的开关「声明 CarPlay 通话能力」。
+    /// 关（默认）= 模式A：/info 里既没有 100 telephony 条目，也没有 HID 电话键。
+    ///   推理依据：v5.42/43（有电话键、无 telephony）时 0 条音频流；v5.44（电话键 + telephony 完整）
+    ///   音乐有声但通话被拉走；本版（电话键 + telephony 输入=0）连音频流都不建。
+    ///   三次实测合起来的共同点：**只要声明里出现"电话键"，iPhone 就要求整套通话能力**，
+    ///   给不全就整体不建音频图。所以这次把电话键和 telephony 一起摘掉，看 iPhone 是否
+    ///   只为媒体/导航建图——那样音乐有声、通话完全留在手机/蓝牙。
+    /// 开 = 模式B：完整 telephony(0x70000150/0x70000150) + 电话键。实测音乐有声，
+    ///   但通话被拉进 CarPlay，配件没有麦克风 → 通话双方都没声。作为"至少音乐有声"的退路。
+    static var telephonyCompat: Bool {
+        UserDefaults.standard.object(forKey: "telephonyCompat") as? Bool ?? false
+    }
+    /// 是否在 /info 里声明通话能力（telephony 条目 + HID 电话键），两者必须同进同退。
+    static var declaresTelephony: Bool { telephonyCompat }
 
     /// 30–60 in steps of 5 (round half up), as the iPhone expects for maxFPS.
     static func sanitizedFPS(_ fps: Int) -> Int {
@@ -63,10 +63,13 @@ enum CarPlayInfo {
             hidDevice(HID.knob, name: "CarWithin 旋钮", descriptor: knobDescriptor),
             hidDevice(HID.media, name: "CarWithin 多媒体键", descriptor: mediaDescriptor)
         ]
-        // 保留电话键：CarPlay 当 iPhone 的第二屏，来电能在车机点接听、平时能点拨打。
-        // 接听/拨打动作只是 HID 按键上报给 iPhone，由 iPhone 真正执行通话；
-        // 通话音频走 CarPlay：对方声音送车机通道3、你的声音由麦克风采集上行回 iPhone。
-        hidDevices.append(hidDevice(HID.telephony, name: "CarWithin 电话键", descriptor: telephonyDescriptor))
+        // 电话键只在声明通话能力时才出现。它是 iPhone 判定"这配件能打电话"的入口：
+        // 有它就要求整套通话能力（telephony 输入/输出都得全），给不全时 iPhone 干脆一条
+        // 音频流都不建（v5.42/43 与大 telephony 输入=0 两版都栽在这）。所以默认不声明，
+        // 让 CarPlay 只当"第二块屏 + 扬声器"，通话回到手机本身或车机蓝牙。
+        if declaresTelephony {
+            hidDevices.append(hidDevice(HID.telephony, name: "CarWithin 电话键", descriptor: telephonyDescriptor))
+        }
         var info: [String: Any] = ["sourceVersion": "509.11", "features": NSNumber(value: features(audio: config.audioEnabled)), "statusFlags": 4,
             "model": "CarWithin1,1", "manufacturer": "CarWithin", "deviceID": config.deviceID,
             "bluetoothIDs": [config.deviceID], "name": config.name, "rightHandDrive": config.rightHandDrive,
@@ -104,16 +107,12 @@ enum CarPlayInfo {
                 // v5.26 试过只声明 PCM(0x8800)，iPhone 连 102 的 SETUP 都不发（日志里只剩「已请求媒体流 110，
                 // 音频格式 无」），音乐全留在手机扬声器上，所以声明必须回到 AAC（0xc00000）。
                 (102, "media", 0xc00000, 0)]
-            // 【模仿官方 CarLife：通话交给手机系统】telephony 只声明输出、不声明输入（audioInputFormats=0）。
-            // 官方百度 CarLife 连接车机后打电话，是在手机上执行通话、用手机麦克风，车机只投屏+放声音；
-            // 我方此前把 telephony 输入写成非零，等于告诉 iPhone「车机有麦克风」，iPhone 就把上行让出来、
-            // 手机系统麦克风不再工作，而车机端又回传不了上行 → 对方听不到。改成输入=0，让 iPhone 维持
-            // 手机系统通话，上行回到手机本机麦克风。对方声音仍经流100→本 App→车机通道3播出。
-            // 注意：只改 telephony 这一条的输入；music/navigation/default 等流的声明全部不动，
-            // 因为 iPhone 建音频图、发媒体流102 依赖的是那些流，不是 telephony 的输入。
-            if audioFormatsCompat {
+            // 【模式B，仅在开关打开时】完整声明 telephony（输入/输出都非零）：这是 v5.44 实测
+            // "音乐有声"的那份配置，同时也把通话拉进 CarPlay（配件无麦 → 通话双方无声）。
+            // 默认（模式A）不写这条，也不发电话键。
+            if declaresTelephony {
                 types.insert((100, "telephony"), at: 5)
-                profiles.insert((100, "telephony", 0x70000150, 0), at: 5)  // input=0：麦克风留给手机系统通话
+                profiles.insert((100, "telephony", 0x70000150, 0x70000150), at: 5)
             }
             info["audioFormats"] = profiles.map { type, audioType, output, input -> [String: Any] in
                 var entry: [String: Any] = ["type": type, "audioType": audioType, "audioOutputFormats": output]
@@ -133,8 +132,10 @@ enum CarPlayInfo {
         guard audio else { return "音频未声明" }
         var text = "100 compatibility(0x8854/0x54) · 101 compatibility(0x8800/0) · 100 default(0x30000050/0x30000050)"
             + " · 100 media(0x8800/0) · 100 alert(0x40008800/0)"
-        if audioFormatsCompat {
-            text += " · 100 telephony(0x70000150/0)［仅输出，麦克风留给手机系统通话］"
+        if declaresTelephony {
+            text += " · 100 telephony(0x70000150/0x70000150)［兼容模式·通话进 CarPlay］"
+        } else {
+            text += " · 无电话键、无 telephony［通话不接管，留给手机/蓝牙］"
         }
         return text + " · 100 speechRecognition(0x20000040/0x20000040)"
             + " · 101 default(0x40008800/0) · 102 media(AAC 0xc00000/0)"
