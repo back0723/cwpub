@@ -24,7 +24,20 @@ enum LocalTLSIdentity {
         let addresses = HTTPSConfiguration.mode == .sslip
             ? addresses + addresses.map { $0.replacingOccurrences(of: ".", with: "-") + ".sslip.io" } : addresses
         let defaults = UserDefaults.standard
-        let (rootKey, rootDER) = try loadRoot()
+        var (rootKey, rootDER) = try loadRoot()
+        // 【旧根证书必须重建】早期版本生成的根证书没有 basicConstraints CA:TRUE，
+        // iOS 手动信任时还能用，但 Android/Chrome（车机浏览器）在证书链校验里直接拒绝，
+        // 表现就是车机打开 https 只能看到 ERR_INSECURE_RESPONSE。这里检测到旧根就一次重建：
+        // 删根私钥、根证书、叶子证书与缓存的地址，随后按新规则重新签发（根带 CA:TRUE）。
+        if !rootIsAuthority(rootDER) {
+            SecItemDelete(keychain.merging([kSecClass: kSecClassKey, kSecAttrApplicationTag: rootTag]) { $1 } as CFDictionary)
+            SecItemDelete(keychain.merging([kSecClass: kSecClassCertificate, kSecAttrLabel: rootLabel]) { $1 } as CFDictionary)
+            SecItemDelete(keychain.merging([kSecClass: kSecClassCertificate, kSecAttrLabel: certificateLabel]) { $1 } as CFDictionary)
+            SecItemDelete(keychain.merging([kSecClass: kSecClassKey, kSecAttrApplicationTag: keyTag]) { $1 } as CFDictionary)
+            defaults.removeObject(forKey: addressesKey)
+            defaults.removeObject(forKey: expiryKey)
+            (rootKey, rootDER) = try loadRoot()
+        }
         let covered = Set(defaults.stringArray(forKey: addressesKey) ?? [])
         let expiry = defaults.object(forKey: expiryKey) as? Date ?? .distantPast
         if Set(addresses).isSubset(of: covered), expiry.timeIntervalSinceNow > 30 * 86_400,
@@ -36,6 +49,18 @@ enum LocalTLSIdentity {
         defaults.set(wanted, forKey: addressesKey)
         defaults.set(created.expiry, forKey: expiryKey)
         return Result(identity: created.identity, rootDER: rootDER, created: true)
+    }
+
+    /// 根证书里是否带 basicConstraints（OID 2.5.29.19，编码 55 1D 13）。
+    private static func rootIsAuthority(_ der: Data) -> Bool {
+        let needle: [UInt8] = [0x55, 0x1d, 0x13]
+        let bytes = [UInt8](der)
+        guard bytes.count >= needle.count else { return false }
+        for index in 0...(bytes.count - needle.count)
+        where bytes[index] == needle[0] && bytes[index + 1] == needle[1] && bytes[index + 2] == needle[2] {
+            return true
+        }
+        return false
     }
 
     static func fingerprint(_ der: Data) -> String {
