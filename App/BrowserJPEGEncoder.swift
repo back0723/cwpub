@@ -268,8 +268,10 @@ final class BrowserJPEGEncoder {
         var created: VTDecompressionSession?
         // 硬解通道在这台 iPhone 上只有一个：本机预览已经占了，兼容解码器再要就会被
         // 反复拒绝（-12903 kVTVideoDecoderMalfunctionErr）。software=true 时显式禁用硬解。
+        // 常量 kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder 在 Swift 里
+        // 带 iOS 17 可用性标注，这里用同名字符串键，运行时行为一致且能编译到低版本 iOS。
         let specification: CFDictionary? = software
-            ? ([kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: false] as CFDictionary)
+            ? (["EnableHardwareAcceleratedVideoDecoder": false] as CFDictionary)
             : nil
         let createStatus = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault, formatDescription: description,
