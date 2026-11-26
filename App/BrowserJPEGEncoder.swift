@@ -43,6 +43,12 @@ final class BrowserJPEGEncoder {
     private var droppedWhileUnready = 0
     /// First JPEG actually produced, logged once per decoder lifetime as end-to-end proof.
     private var loggedFirstJPEG = false
+    /// Consecutive decode failures. Two in a row means the hardware decoder is not usable for
+    /// this stream (it shares the iPhone's single hardware H.264 channel with the local preview
+    /// and answers -12903 kVTVideoDecoderMalfunctionErr), so the decoder drops to software.
+    private var decodeFailures = 0
+    /// Latched once software decoding was needed; kept for the process lifetime.
+    private var softwareDecode = false
 
     /// Called on `queue` with a complete JPEG (no leading opcode). The server adds its own header.
     var onJPEG: ((Data) -> Void)?
@@ -75,9 +81,12 @@ final class BrowserJPEGEncoder {
                 self.onLog?("JPEG 解码器暂不能配置：参数集不完整（SPS \(newParameters.sps?.count ?? 0) / PPS \(newParameters.pps?.count ?? 0)）")
                 return
             }
-            guard newParameters != self.parameters else { return }
+            let unchanged = newParameters == self.parameters
             self.parameters = newParameters
-            self.rebuildSessionLocked(newParameters)
+            // 每次 CarPlay 会话重启都会把服务端的参数集清空重来，而这里保存的可能是上一场的，
+            // 参数没变但解码器已经不在了（-12903 之后被扔掉）也必须重建，否则画面永远不出来。
+            if unchanged, self.session != nil, !self.softwareDecode { return }
+            self.rebuildSessionLocked(newParameters, software: self.softwareDecode)
         }
     }
 
@@ -88,7 +97,14 @@ final class BrowserJPEGEncoder {
             // A compatibility viewer can connect long after the configuration record, and a
             // stream reset can drop it: recover SPS/PPS from the access unit itself so the JPEG
             // path can never stay silent just because configure() was never reached.
-            if self.session == nil { self.adoptLocked(from: sample) }
+            if self.session == nil {
+                self.adoptLocked(from: sample)
+                // 这一帧没带参数集（普通 P 帧）时，用上一次缓存的参数集也要把解码器建起来，
+                // 否则一次 -12903 之后兼容画面就再也不会恢复。
+                if self.session == nil, let stored = self.parameters {
+                    self.rebuildSessionLocked(stored, software: self.softwareDecode)
+                }
+            }
             guard self.session != nil else {
                 self.droppedWhileUnready += 1
                 if self.droppedWhileUnready == 1 || self.droppedWhileUnready % 90 == 0 {
@@ -106,9 +122,22 @@ final class BrowserJPEGEncoder {
         }
     }
 
-    /// Reads the 4-byte length-prefixed NAL units of one access unit and, when it carries
-    /// parameter sets, rebuilds the decoder from them.
+    /// When no decoder survives: rebuild it from the parameter sets carried by this access unit.
     private func adoptLocked(from sample: Data) {
+        guard let sets = Self.parameterSets(in: sample) else { return }
+        if sets != parameters {
+            parameters = sets
+            onLog?("JPEG 兼容：从访问单元补齐参数集（\(sets.codec.displayName) SPS \(sets.sps?.count ?? 0) / PPS \(sets.pps?.count ?? 0)）")
+        }
+        rebuildSessionLocked(sets, software: softwareDecode)
+        if session != nil {
+            onLog?("JPEG 兼容解码器已建立（\(sets.codec.displayName)，\(softwareDecode ? "软件" : "硬件")解码）")
+        }
+    }
+
+    /// Reads the 4-byte length-prefixed NAL units of one access unit and returns the parameter
+    /// sets it carries (H.264 SPS/PPS or H.265 VPS/SPS/PPS). Returns nil when it carries none.
+    static func parameterSets(in sample: Data) -> VideoParameterSets? {
         let bytes = [UInt8](sample)
         var offset = 0
         var units: [UInt8: Data] = [:]
@@ -117,7 +146,7 @@ final class BrowserJPEGEncoder {
             let length = (Int(bytes[offset]) << 24) | (Int(bytes[offset + 1]) << 16)
                        | (Int(bytes[offset + 2]) << 8) | Int(bytes[offset + 3])
             offset += 4
-            guard length > 0, length <= bytes.count - offset else { return }
+            guard length > 0, length <= bytes.count - offset else { return nil }
             let unit = Data(bytes[offset..<(offset + length)])
             offset += length
             guard let first = unit.first else { continue }
@@ -129,22 +158,15 @@ final class BrowserJPEGEncoder {
             else if h265 == 33 { units[33] = unit; codec = codec ?? .h265 }
             else if h265 == 34 { units[34] = unit; codec = codec ?? .h265 }
         }
-        guard let codec else { return }
-        let sets: VideoParameterSets
+        guard let codec else { return nil }
         switch codec {
         case .h264:
-            guard let sps = units[7], let pps = units[8] else { return }
-            sets = VideoParameterSets(codec: .h264, sps: sps, pps: pps)
+            guard let sps = units[7], let pps = units[8] else { return nil }
+            return VideoParameterSets(codec: .h264, sps: sps, pps: pps)
         case .h265:
-            guard let vps = units[32], let sps = units[33], let pps = units[34] else { return }
-            sets = VideoParameterSets(codec: .h265, vps: vps, sps: sps, pps: pps)
+            guard let vps = units[32], let sps = units[33], let pps = units[34] else { return nil }
+            return VideoParameterSets(codec: .h265, vps: vps, sps: sps, pps: pps)
         }
-        if sets != parameters {
-            parameters = sets
-            onLog?("JPEG 兼容：从访问单元补齐参数集（\(codec.displayName) SPS \(sets.sps?.count ?? 0) / PPS \(sets.pps?.count ?? 0)）")
-        }
-        rebuildSessionLocked(sets)
-        if session != nil { onLog?("JPEG 兼容解码器已建立（\(codec.displayName)）") }
     }
 
     /// Tear down the decoder. Called when no JPEG viewer remains.
@@ -160,13 +182,14 @@ final class BrowserJPEGEncoder {
             self.pending = nil
             self.decoding = false
             self.droppedWhileUnready = 0
+            self.decodeFailures = 0
             self.loggedFirstJPEG = false
         }
     }
 
     // MARK: - session
 
-    private func rebuildSessionLocked(_ parameters: VideoParameterSets) {
+    private func rebuildSessionLocked(_ parameters: VideoParameterSets, software: Bool = false) {
         if let session {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
             VTDecompressionSessionInvalidate(session)
@@ -232,9 +255,14 @@ final class BrowserJPEGEncoder {
             decompressionOutputRefCon: Unmanaged.passUnretained(callbackBox).toOpaque()
         )
         var created: VTDecompressionSession?
+        // 硬解通道在这台 iPhone 上只有一个：本机预览已经占了，兼容解码器再要就会被
+        // 反复拒绝（-12903 kVTVideoDecoderMalfunctionErr）。software=true 时显式禁用硬解。
+        let specification: CFDictionary? = software
+            ? ([kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: false] as CFDictionary)
+            : nil
         let createStatus = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault, formatDescription: description,
-            decoderSpecification: nil, imageBufferAttributes: attributes as CFDictionary,
+            decoderSpecification: specification, imageBufferAttributes: attributes as CFDictionary,
             outputCallback: &record, decompressionSessionOut: &created)
         guard createStatus == noErr, let created else {
             onLog?("JPEG 解码器建立失败：VTDecompressionSessionCreate 返回 \(createStatus)")
@@ -243,6 +271,7 @@ final class BrowserJPEGEncoder {
         _ = VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         session = created
         decoding = false
+        decodeFailures = 0
     }
 
     /// Optional log hook wired by the server.
@@ -296,7 +325,34 @@ final class BrowserJPEGEncoder {
                 onLog?("JPEG 提交解码失败（\(decodeStatus)），等待下一关键帧")
             }
             decoding = false
+            recoverLocked(status: decodeStatus, sample: sample)
             drainPendingLocked()
+        }
+    }
+
+    /// 解码失败后的自愈阶梯：先用这一帧里的参数集重建（会话换了分辨率时旧格式描述会一直报错），
+    /// 再退软件解码（硬解通道被本机预览占着，硬解会一直 -12903），最后才把解码器扔掉等关键帧。
+    private func recoverLocked(status: OSStatus, sample: Data) {
+        decodeFailures += 1
+        if let sets = Self.parameterSets(in: sample), sets.isComplete, sets != parameters {
+            parameters = sets
+            onLog?("JPEG 兼容：解码失败（\(status)），按这一帧的新参数集重建解码器")
+            rebuildSessionLocked(sets, software: softwareDecode)
+            return
+        }
+        if decodeFailures >= 2, !softwareDecode {
+            softwareDecode = true
+            onLog?("JPEG 解码失败（\(status)），改用软件解码（硬解通道被本机预览占用）")
+            if let parameters { rebuildSessionLocked(parameters, software: true) } else { session = nil }
+            return
+        }
+        if decodeFailures >= 8 {
+            session = nil
+            formatDescription = nil
+            parameters = nil
+            decodeFailures = 0
+            droppedWhileUnready = 0
+            onLog?("JPEG 解码器连续失败（\(status)），已重置，等下一个关键帧")
         }
     }
 
