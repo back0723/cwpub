@@ -62,6 +62,12 @@ final class VideoOutputServer {
         var mjpegWriting = false
         /// 页面声明"画面走 /mjpeg"：这条 WebSocket 就不再收 JPEG 帧，只管触控/声音/尺寸。
         var mjpegPage = false
+        /// CarMode 2.5 网页的观看端：二进制帧按它的格式发（1=H.264 裸 AU，2=PCM，3=JPEG）。
+        var carMode = false
+        /// 给 CarMode 页面的 epoch：页面靠它判断"要不要重播器"，会话内保持不变即可。
+        var carModeEpoch = 1
+        /// 已经给 CarMode 页面发过 phase=ready。
+        var carModeReadySent = false
         let secure: Bool
         init(connection: NWConnection, secure: Bool) {
             self.connection = connection; self.secure = secure
@@ -86,6 +92,8 @@ final class VideoOutputServer {
     private var primaryBrowser: UUID?
     private var returningViewer: UUID?
     private var generation = UUID()
+    /// 浏览器接收页的明文端口；车机页面从 /connection.json 读它，再连 WebSocket。
+    private var httpPort: UInt16 = 0
     private var parameters = VideoParameterSets(codec: .h264)
     private var format: FragmentedMP4.Format?
     /// avcC/hvcC for WebCodecs `description`.
@@ -159,6 +167,13 @@ final class VideoOutputServer {
             guard let self else { return }
             self.queue.async {
                 for client in Array(self.clients.values) {
+                    if client.carMode, client.usesJPEG, client.mode == .webSocket {
+                        // CarMode 页面的兼容画面就是 tag 3 + 一整张 JPEG，页面按图片自然尺寸画。
+                        var packet = Data([3])
+                        packet.append(jpeg)
+                        self.sendWebSocket(packet, opcode: 2, to: client)
+                        continue
+                    }
                     switch client.mode {
                     case .mjpeg: self.pushMJPEG(jpeg, to: client)
                     case .webSocket where client.usesJPEG && !client.mjpegPage:
@@ -205,8 +220,17 @@ final class VideoOutputServer {
                 samples.append(Int16(bounded * 32767).littleEndian)
             }
         }
-        samples.withUnsafeBytes { packet.append(contentsOf: $0) }
+        let sampleBytes = samples.withUnsafeBytes { Data($0) }
+        packet.append(sampleBytes)
         let wire = packet
+        // CarMode 页面的音频格式：16 字节头（tag 2 / 声道 / 保留 / 采样率 BE / stream id 两个 u32），
+        // 后面是交织的 PCM16 小端。同一个包换两种头就行，不用两套编码。
+        var carModePacket = Data([2, UInt8(channels), 0, 0])
+        withUnsafeBytes(of: sampleRate.bigEndian) { carModePacket.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(0).bigEndian) { carModePacket.append(contentsOf: $0) }
+        withUnsafeBytes(of: UInt32(max(0, stream)).bigEndian) { carModePacket.append(contentsOf: $0) }
+        carModePacket.append(sampleBytes)
+        let carModeWire = carModePacket
         queue.async { [weak self] in
             // 原来这里还卡了一道 self.browserAudio：JPEG 兼容画面下这个标志偶尔是 false，
             // 结果音频永远送不出去。真正该判的是"页面要不要"。
@@ -214,7 +238,7 @@ final class VideoOutputServer {
             var delivered = 0
             for client in Array(self.clients.values) where client.wantsAudio && client.streamStarted
                 && client.pendingBytes < self.skipPendingBytes {
-                self.sendWebSocket(wire, opcode: 2, to: client)
+                self.sendWebSocket(client.carMode ? carModeWire : wire, opcode: 2, to: client)
                 delivered += 1
             }
             if delivered > 0, self.audioForwarded == 0 {
@@ -235,6 +259,7 @@ final class VideoOutputServer {
         if let airPlayStreamID { hls = CarPlayHLS(id: airPlayStreamID) }
         self.width = width; self.height = height; self.fps = fps
         let run = generation
+        httpPort = port
         returningViewer = preferredViewer
         if preferredViewer != nil {
             queue.asyncAfter(deadline: .now() + 6) { [weak self] in
@@ -360,8 +385,42 @@ final class VideoOutputServer {
             }
             return
         }
+        // 画面线整体换成 CarMode 2.5 的车机网页：它连的是 ws://host:port（路径就是 /），
+        // 所以升级请求必须在路由之前拦下来，否则会被当成要 HTML 的普通 GET。
+        if headers["upgrade"]?.lowercased() == "websocket" {
+            guard viewerCount < Self.maximumViewers else { reject(client, status: "503 Service Unavailable"); return }
+            upgradeWebSocket(client, headers: headers)
+            return
+        }
         switch path {
-        case "/", "/index.html":
+        case "/", "/index.html", "/cm", "/cm/":
+            sendHTTP(status: "200 OK", contentType: "text/html; charset=utf-8", body: CarModePage.html, to: client.connection) { [weak self, weak client] in
+                guard let self, let client else { return }; self.close(client, reason: nil)
+            }
+        case "/projection.js":
+            sendHTTP(status: "200 OK", contentType: "application/javascript; charset=utf-8", body: CarModePage.script, to: client.connection) { [weak self, weak client] in
+                guard let self, let client else { return }; self.close(client, reason: nil)
+            }
+        case "/projection.css":
+            sendHTTP(status: "200 OK", contentType: "text/css; charset=utf-8", body: CarModePage.styles, to: client.connection) { [weak self, weak client] in
+                guard let self, let client else { return }; self.close(client, reason: nil)
+            }
+        case "/pcm-playout.js":
+            sendHTTP(status: "200 OK", contentType: "application/javascript; charset=utf-8", body: CarModePage.playout, to: client.connection) { [weak self, weak client] in
+                guard let self, let client else { return }; self.close(client, reason: nil)
+            }
+        case "/jmuxer.min.js":
+            // 车机没有外网，JMuxer 由我们自己吐（base64 内嵌，避免工程再加资源文件）。
+            sendHTTP(status: "200 OK", contentType: "application/javascript; charset=utf-8", body: JMuxerAsset.data, to: client.connection) { [weak self, weak client] in
+                guard let self, let client else { return }; self.close(client, reason: nil)
+            }
+        case "/connection.json":
+            let body = Data("{\"generation\":\"\(generation.uuidString)\",\"port\":\(httpPort)}".utf8)
+            sendHTTP(status: "200 OK", contentType: "application/json; charset=utf-8", body: body, to: client.connection) { [weak self, weak client] in
+                guard let self, let client else { return }; self.close(client, reason: nil)
+            }
+        case "/legacy", "/y":
+            // 我们原来那套页面留个入口：CarMode 页面调不动时有退路。
             sendHTTP(status: "200 OK", contentType: "text/html; charset=utf-8", body: BrowserReceiverPage.html, to: client.connection) { [weak self, weak client] in
                 guard let self, let client else { return }; self.close(client, reason: nil)
             }
@@ -511,6 +570,64 @@ final class VideoOutputServer {
               let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = object["type"] as? String else { throw WebSocketError.invalidJSON }
         switch type {
+        case "claim":
+            // CarMode 2.5 页面的握手：claim → grant → 页面立刻上报 viewport、再等 state。
+            client.carMode = true
+            client.browserReady = true
+            client.waitingForIDR = true
+            client.streamStarted = false
+            sendJSON(["type": "grant", "grant": generation.uuidString], to: client)
+            sendCarModeState("idle", message: "已连接，点「开始投屏」", to: client)
+            onLog?("\(client.peer) 接入 CarMode 网页（\(CarModePage.version)）")
+        case "viewport":
+            guard client.carMode else { break }
+            // CarMode 页面上报的是 player 的 CSS 尺寸 × devicePixelRatio，已经是真实像素。
+            let w = (object["width"] as? NSNumber)?.intValue ?? 0
+            let h = (object["height"] as? NSNumber)?.intValue ?? 0
+            guard (160...8192).contains(w), (160...8192).contains(h) else { break }
+            let ratio = (object["dpr"] as? NSNumber)?.doubleValue ?? 1
+            let display = BrowserDisplay(width: w, height: h, screenWidth: w, screenHeight: h,
+                devicePixelRatio: ratio.isFinite ? min(max(ratio, 0.5), 5) : 1,
+                refreshHz: 0, supportsH265: false, fullscreen: false, peer: client.peer)
+            if client.display?.width != w || client.display?.height != h {
+                onLog?("\(client.peer) 页面视口 \(w)×\(h)")
+            }
+            client.display = display
+            client.awaitingDisplay = false
+            updatePrimaryDisplay(changed: client.id)
+            // 页面只在 phase 为 idle/failed 时才显示「开始投屏」按钮，所以这里必须保持 idle。
+            sendCarModeState("idle", message: "点「开始投屏」开始", to: client)
+        case "start":
+            guard client.carMode else { break }
+            onLog?("\(client.peer) 在车机页面上点了「开始投屏」")
+            sendCarModeState("connecting", message: "正在准备画面", to: client)
+            onStartRequest?(client.peer)
+        case "touch":
+            guard client.carMode else { break }
+            // CarMode 的触控是归一化坐标 + epoch + down/move/up/cancel，这里换成我们内部
+            // "当前手指集合"的语义（同一根手指固定 id 0）。
+            let action = object["action"] as? String ?? "down"
+            let x = (object["x"] as? NSNumber)?.doubleValue ?? 0
+            let y = (object["y"] as? NSNumber)?.doubleValue ?? 0
+            guard x.isFinite, y.isFinite else { break }
+            let point = TouchPoint(id: 0, x: max(0, min(1, x)), y: max(0, min(1, y)))
+            let active = !(action == "up" || action == "cancel")
+            client.touching = active
+            onTouches?(client.id.uuidString, active ? [point] : [])
+        case "sound":
+            guard client.carMode else { break }
+            let enabled = object["enabled"] as? Bool == true
+            if enabled != client.wantsAudio {
+                client.wantsAudio = enabled
+                onLog?("\(client.peer) 页面声音：\(enabled ? "开启" : "关闭")")
+            }
+        case "rendered":
+            guard client.carMode, !client.carModeReadySent else { break }
+            client.carModeReadySent = true
+            onLog?("\(client.peer) 车机页面已画出第一帧")
+        case "disconnect":
+            guard client.carMode else { break }
+            close(client, reason: "车机页面主动断开")
         case "ready":
             if !client.browserReady, let id = object["viewer"] as? String { client.viewerID = UUID(uuidString: id) }
             client.browserReady = true; client.waitingForIDR = true; client.streamStarted = false; client.skippingToIDR = false
@@ -567,6 +684,12 @@ final class VideoOutputServer {
             client.streamStarted = true
             if parameters.isComplete { jpegEncoder.configure(parameters: parameters) }
             onLog?("\(client.peer) 请求 JPEG 兼容画面")
+            if client.carMode {
+                // CarMode 页面的兜底：它自己去要点 IDR，我们再让 iPhone 送一个关键帧，
+                // 否则共享的 JPEG 解码器在没有 IDR 的时候解不出完整图。
+                onKeyframeRequest?("\(client.peer)：CarMode 页面改用兼容画面")
+                sendCarModeState("ready", message: "已切换到兼容画面", to: client)
+            }
             if parameters.isComplete {
                 sendJSON(["type": "format", "codec": "jpeg", "name": "JPEG", "decoder": "jpeg",
                           "width": width, "height": height, "fps": fps, "viewers": viewerCount,
@@ -754,7 +877,7 @@ final class VideoOutputServer {
     /// 2 = initialization segment, 1 = keyframe fragment, 0 = dependent fragment.
     /// WebCodecs viewers get the same first byte, then 8 bytes big-endian arrival time (µs),
     /// then the length-prefixed (AVCC/HVCC) sample.
-    private enum BrowserPacket: UInt8 { case delta = 0, keyframe = 1, initialization = 2, audio = 3, timedDelta = 4, timedKeyframe = 5, jpeg = 6 }
+    private enum BrowserPacket: UInt8 { case delta = 0, keyframe = 1, initialization = 2, audio = 3, timedDelta = 4, timedKeyframe = 5, jpeg = 6, carModeVideo = 7 }
 
     private static func appendTimestamp(_ timestamp: UInt64, to data: inout Data) {
         withUnsafeBytes(of: timestamp.bigEndian) { data.append(contentsOf: $0) }
@@ -789,6 +912,23 @@ final class VideoOutputServer {
                 send(header + annexB, to: client)
             } else { send(annexB, to: client) }
         case .webSocket:
+            if client.carMode {
+                // CarMode 页面：每帧一个原始 Annex-B 访问单元（tag 1），关键帧前补 SPS/PPS，
+                // 页面用 JMuxer + MSE 硬件解码——这条就是它比我们旧页面流畅的地方，不重新封装。
+                if client.waitingForIDR {
+                    guard keyframe, parameters.isComplete else { break }
+                    client.waitingForIDR = false; client.streamStarted = true
+                    sendCarModeState("ready", message: "已连接 CarPlay", to: client)
+                    report("\(client.peer) 已开始显示 CarPlay（JMuxer 硬解）")
+                }
+                var packet = Data([BrowserPacket.carModeVideo.rawValue])
+                if keyframe, parameters.isComplete {
+                    for unit in parameters.ordered { packet.append(contentsOf: [0, 0, 0, 1]); packet.append(unit) }
+                }
+                packet.append(annexB)
+                sendWebSocket(packet, opcode: 2, to: client)
+                return
+            }
             guard client.browserReady, let format, let decoderRecord else { return }
             if client.waitingForIDR {
                 guard keyframe else { return }
@@ -827,6 +967,13 @@ final class VideoOutputServer {
     }
 
     // MARK: Output
+
+    /// CarMode 页面的状态机：phase 只认 idle / connecting / ready / failed。
+    private func sendCarModeState(_ phase: String, message: String, to client: Client) {
+        sendJSON(["type": "state", "phase": phase, "message": message,
+                  "epoch": client.carModeEpoch, "audio": browserAudio,
+                  "audioKey": NSNull(), "refitAvailable": true], to: client)
+    }
 
     private func sendJSON(_ object: [String: Any], to client: Client) {
         guard JSONSerialization.isValidJSONObject(object),
