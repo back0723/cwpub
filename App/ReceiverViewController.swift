@@ -130,29 +130,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let httpsExpandedKey = "browserHTTPSExpanded"
     private var httpsExpanded: Bool { UserDefaults.standard.bool(forKey: httpsExpandedKey) }
     private let browserCard = UIStackView()
-    private let zeehoCard = UIStackView()
-    private let zeehoCardStatus = UILabel()
-    private let zeehoStatus = StatusLabel()
-    private let zeehoAddressField = UITextField()
-    private func updateZeehoStatus(_ message: String) {
-        zeehoStatus.text = message
-        zeehoCardStatus.text = message
-    }
-    private let ninebotCard = UIStackView()
-    private let ninebotCardStatus = UILabel()
-    private let ninebotStatus = StatusLabel()
-    private let ninebotAddressField = UITextField()
-    private func updateNinebotStatus(_ message: String) {
-        ninebotStatus.text = message
-        ninebotCardStatus.text = message
-    }
-    private let tailingCard = UIStackView()
-    private let tailingCardStatus = UILabel()
-    private let tailingAddressField = UITextField()
-    private let tailingStatus = StatusLabel()
-    private func updateTailingStatus(_ message: String) {
-        tailingStatus.text = message; tailingCardStatus.text = message
-    }
     private let carLifeCard = UIStackView()
     private let airPlayCard = UIStackView()
     private let carLifeCardStatus = UILabel()
@@ -181,10 +158,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let keepAliveSwitch = UISwitch()
     /// 只保留两种输出：浏览器、CarLife。AirPlay / 台铃 / 九号 / 极核 已全部移除。
     private let headUnitOutput = ChoiceMenu(items: ["浏览器", "CarLife"])
-    /// rawValue 保持不变（历史偏好里可能存着 2…5，载入时会被夹回 browser/carLife）。
+    /// rawValue 保持不变（历史偏好里可能存着 2…5，rawValue 初始化失败即回落 browser）。
     private enum HeadUnitOutput: Int {
-        case browser, carLife, airPlay, tailing, ninebot, zeeho
-        var usesInstrumentWiFi: Bool { self == .tailing || self == .ninebot || self == .zeeho }
+        case browser, carLife, airPlay
     }
     private var airPlayStreamID: UUID?
     private var airPlayStreamURL: URL?
@@ -537,18 +513,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             self?.receiver.touches(source: "local", points)
             self?.refreshFullscreenExitButton()
         }
-        receiver.onZeehoState = { [weak self] message in
-            guard let self, self.running, self.outputMode == .zeeho else { return }
-            self.updateZeehoStatus(message)
-        }
-        receiver.onNinebotState = { [weak self] message in
-            guard let self, self.running, self.outputMode == .ninebot else { return }
-            self.updateNinebotStatus(message)
-        }
-        receiver.onTailingState = { [weak self] message in
-            guard let self, self.running, self.outputMode == .tailing else { return }
-            self.updateTailingStatus(message)
-        }
         receiver.onCarLifeState = { [weak self] message in
             guard let self, self.running, self.outputMode == .carLife else { return }
             self.updateCarLifeStatus(message)
@@ -738,20 +702,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     /// Size, frame rate and codec for the next session from the settings, the known head-unit
     /// screen and any lighter level chosen by "自动重启".
     private func planDisplay(for screen: CarScreen?) -> DisplayPlan {
-        if outputMode == .zeeho {
-            let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
-            return DisplayPlan(width: 1024, height: 480, fps: 30, codec: .h264, iconWidthMM: icon)
-        }
-        if outputMode == .ninebot {
-            let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
-            return DisplayPlan(width: NinebotOutput.width, height: NinebotOutput.height,
-                               fps: NinebotOutput.fps, codec: .h264, iconWidthMM: icon)
-        }
-        if outputMode == .tailing {
-            // CarPlay requires at least 320 per side; render 2× the instrument then downsample.
-            let icon = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
-            return DisplayPlan(width: 960, height: 544, fps: 30, codec: .h264, iconWidthMM: icon)
-        }
         let cap = selectedResolution()
         let portrait = UIDevice.current.userInterfaceIdiom == .pad && orientationControl.selectedSegmentIndex == 1
         var width = portrait ? cap.height : cap.width, height = portrait ? cap.width : cap.height
@@ -977,12 +927,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         secureVideoOutputPortField.placeholder = String(defaultSecurePort)
         portStatus.text = browserPortError ?? (running ? "停止 CarPlay 后可修改端口。" : "启动 CarPlay 后即可打开上方地址。")
         let showsLocalOutput = modeControl.selectedSegmentIndex != 2
-        zeehoCard.isHidden = !showsLocalOutput || outputMode != .zeeho
-        if !running { updateZeehoStatus("等待启动 CarPlay · 仪表 IP：\(zeehoAddressField.text ?? "192.168.0.1")") }
-        ninebotCard.isHidden = !showsLocalOutput || outputMode != .ninebot
-        if !running { updateNinebotStatus("等待启动 CarPlay · 仪表 IP：\(ninebotAddressField.text ?? "")") }
-        tailingCard.isHidden = !showsLocalOutput || outputMode != .tailing
-        if !running { updateTailingStatus("等待启动 CarPlay · 仪表 IP：\(tailingAddressField.text ?? "192.168.1.1")") }
         carLifeCard.isHidden = !showsLocalOutput || outputMode != .carLife
         airPlayCard.isHidden = !showsLocalOutput || outputMode != .airPlay
         browserCard.isHidden = outputMode != .browser || !videoOutputSwitch.isOn
@@ -1034,31 +978,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         // （或点"开启声音"）时才真正播放，所以这里始终把音频送往浏览器，声音开关交给页面。
         config.browserAudio = config.videoOutputPort != nil && outputMode == .browser
         if outputMode == .airPlay, config.videoOutputPort != nil { config.airPlayStreamID = UUID() }
-        if outputMode == .zeeho {
-            config.zeehoAddress = (zeehoAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if outputMode == .ninebot {
-            config.ninebotAddress = (ninebotAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if outputMode.usesInstrumentWiFi {
-            let screen = view.window?.screen ?? UIScreen.main
-            let orientation = view.window?.windowScene?.interfaceOrientation
-            let rotation: Int
-            switch orientation {
-            case .landscapeLeft: rotation = 1
-            case .portraitUpsideDown: rotation = 2
-            case .landscapeRight: rotation = 3
-            default: rotation = 0
-            }
-            config.tailingPhoneInfo = TailingPhoneInfo(package: Bundle.main.bundleIdentifier ?? "CarWithin",
-                versionCode: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0,
-                model: UIDevice.current.model, systemVersion: UIDevice.current.systemVersion,
-                width: Int(screen.bounds.width * screen.scale), height: Int(screen.bounds.height * screen.scale), rotation: rotation)
-        }
-        if outputMode == .tailing {
-            config.tailingAddress = (tailingAddressField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-
-        }
         config.carLifeEnabled = outputMode == .carLife
         // 「随画面传输」在两种模式下落到不同通道：
         // · CarLife 模式 → CarLife 伴音通道（车机靠它出声）；
@@ -1499,7 +1418,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
 
     private var localCarPlayAddress: String? {
-        outputMode.usesInstrumentWiFi ? ReceiverConfiguration.lanIPv4Address() : browserAddress
+        browserAddress
     }
 
     private func refreshNetworkAddresses() {
@@ -1684,9 +1603,6 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         bluetoothSetupSwitch.isEnabled = value
         transportProbeButton.isEnabled = value
         headUnitOutput.isEnabled = value
-        zeehoAddressField.isEnabled = value
-        ninebotAddressField.isEnabled = value
-        tailingAddressField.isEnabled = value
         carLifeAddressField.isEnabled = value
     }
     @objc private func willResignActive() {
@@ -1960,19 +1876,10 @@ extension ReceiverViewController {
         let previousOutput = defaults.object(forKey: "headUnitOutput") as? Int
         let legacyOutput: HeadUnitOutput = defaults.bool(forKey: "carLifeEnabled") ? .carLife : .browser
         let migratedOutput = previousOutput.map { $0 == 1 ? HeadUnitOutput.carLife : .browser } ?? legacyOutput
-        // 老偏好里可能存着 airPlay/tailing/ninebot/zeeho（2…5），统一夹回两种合法输出。
+        // 老偏好里可能存着已删掉的输出（2…5），rawValue 初始化会失败，统一夹回两种合法输出。
         let savedMode = savedOutput.flatMap(HeadUnitOutput.init(rawValue:)) ?? migratedOutput
         headUnitOutput.selectedSegmentIndex = (savedMode == .carLife ? HeadUnitOutput.carLife : .browser).rawValue
         headUnitOutput.addTarget(self, action: #selector(headUnitOutputChanged), for: .valueChanged)
-        zeehoAddressField.text = defaults.string(forKey: "zeehoAddress") ?? "192.168.0.1"
-        zeehoAddressField.keyboardType = .decimalPad
-        zeehoAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
-        ninebotAddressField.text = defaults.string(forKey: "ninebotAddress") ?? "192.168.1.1"
-        ninebotAddressField.keyboardType = .decimalPad
-        ninebotAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
-        tailingAddressField.text = defaults.string(forKey: "tailingAddress") ?? "192.168.1.1"
-        tailingAddressField.keyboardType = .decimalPad
-        tailingAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         carLifeAddressField.text = defaults.string(forKey: "carLifeAddress")
         carLifeAddressField.keyboardType = .decimalPad
         carLifeAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
@@ -2004,7 +1911,7 @@ extension ReceiverViewController {
         }
         nameField.addTarget(self, action: #selector(receiverNameChanged), for: .editingDidEnd)
         channelField.keyboardType = .numberPad
-        [nameField, ipField, ssidField, passwordField, channelField, carLifeAddressField, tailingAddressField, ninebotAddressField, zeehoAddressField, videoOutputPortField, secureVideoOutputPortField, httpsDomainField, httpsTokenField].forEach {
+        [nameField, ipField, ssidField, passwordField, channelField, carLifeAddressField, videoOutputPortField, secureVideoOutputPortField, httpsDomainField, httpsTokenField].forEach {
             $0.returnKeyType = .done
             $0.addTarget($0, action: #selector(UIResponder.resignFirstResponder), for: .editingDidEndOnExit)
             if $0.inputAccessoryView == nil {
@@ -2022,9 +1929,6 @@ extension ReceiverViewController {
     @objc private func saveHeadUnitOutput() {
         UserDefaults.standard.set(outputMode.rawValue, forKey: "headUnitOutputV2")
         UserDefaults.standard.set(carLifeAddressField.text ?? "", forKey: "carLifeAddress")
-        UserDefaults.standard.set(zeehoAddressField.text ?? "", forKey: "zeehoAddress")
-        UserDefaults.standard.set(ninebotAddressField.text ?? "", forKey: "ninebotAddress")
-        UserDefaults.standard.set(tailingAddressField.text ?? "", forKey: "tailingAddress")
         refreshVideoOutputSummary()
     }
     @objc private func headUnitOutputChanged() {
@@ -2252,7 +2156,7 @@ extension ReceiverViewController {
                 SettingsSection("连接与输出", connection),
                 SettingsSection("CarPlay", [
                     .page("画面", icon: ("rectangle.on.rectangle", .systemGreen), detail: { [unowned self] in
-                        self.outputMode.usesInstrumentWiFi ? "仪表固定尺寸" : self.followsCarScreen ? "跟随车机" : self.resolutionControl.selectedTitle.components(separatedBy: "（").first
+                        self.followsCarScreen ? "跟随车机" : self.resolutionControl.selectedTitle.components(separatedBy: "（").first
                     }) { [unowned self] in self.displayPage() },
                     .control("CarPlay 外观", icon: ("circle.lefthalf.filled", .systemBlue), appearanceControl),
                     .page("声音", icon: ("speaker.wave.2.fill", .systemOrange), detail: { [unowned self] in
@@ -2277,29 +2181,6 @@ extension ReceiverViewController {
 
     fileprivate func displayPage() -> SettingsPageController {
         page("画面") { [unowned self] in
-            if outputMode == .zeeho {
-                return [
-                    SettingsSection("极核 6.2 寸", [.info("仪表画面", "1024×480 · H.264 · 25 FPS")]),
-                    SettingsSection("图标", [.control("CarPlay 图标大小", icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
-                ]
-            }
-            if outputMode == .ninebot {
-                return [
-                    SettingsSection("九号 5 寸", [
-                        .info("本机与仪表画面", "848×480 · H.264 · 30 FPS")
-                    ]),
-                    SettingsSection("图标", [.control("CarPlay 图标大小", icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
-                ]
-            }
-            if outputMode == .tailing {
-                return [
-                    SettingsSection("台铃 4.3 寸", footer: "选择台铃输出时自动使用匹配的画面参数；切回其他输出后恢复原设置。", [
-                        .info("仪表画面", "480×272 · JPEG · 最高 20 FPS"),
-                        .info("本机 CarPlay", "960×544 · H.264 · 30 FPS")
-                    ]),
-                    SettingsSection("图标", [.control("CarPlay 图标大小", icon: ("square.grid.2x2.fill", .systemPurple), iconSizeControl)])
-                ]
-            }
             var size: [SettingsRow] = [.control("画面尺寸", icon: ("aspectratio.fill", .systemGreen), sizeModeControl)]
             if followsCarScreen {
                 size.append(.page("车机屏幕", icon: ("display", .systemGreen), detail: { [unowned self] in
@@ -2585,17 +2466,6 @@ extension ReceiverViewController {
             case .browser: return browserOutputSections()
             case .carLife: return carLifeOutputSections()
             case .airPlay: return airPlayOutputSections()
-            case .tailing: return tailingOutputSections()
-            case .zeeho:
-                return [SettingsSection("极核 AE4 MAX2+ 6.2 寸", footer: "让 iPhone 加入仪表 Wi-Fi，选择同名预设。结束其他投屏，打开仪表投屏后启动 CarPlay。声音由 iPhone 或蓝牙输出。", [
-                    .field("仪表 IP 地址", zeehoAddressField, placeholder: "192.168.0.1"),
-                    .note(zeehoStatus)
-                ])]
-            case .ninebot:
-                return [SettingsSection("九号 5 寸", footer: "iPhone 加入仪表 Wi-Fi 后，选择对应的 Wi-Fi 预设。先结束其他投屏，再打开仪表的投屏功能。声音由 iPhone 或蓝牙输出，触控在手机上操作。", [
-                    .field("仪表 IP 地址", ninebotAddressField, placeholder: "192.168.1.1"),
-                    .note(ninebotStatus)
-                ])]
             }
         }
     }
@@ -2610,9 +2480,6 @@ extension ReceiverViewController {
     }
 
     private func prepareExternalOutput(configuration: ReceiverConfiguration) {
-        if configuration.zeehoAddress != nil { updateZeehoStatus("正在连接极核仪表…") }
-        if configuration.ninebotAddress != nil { updateNinebotStatus("正在连接九号仪表…") }
-        if configuration.tailingAddress != nil { updateTailingStatus("正在连接台铃仪表…") }
         if configuration.carLifeEnabled {
             updateCarLifeStatus("正在等待车机连接…")
         }
@@ -2676,15 +2543,6 @@ extension ReceiverViewController {
         } else {
             updateAirPlayStatus("画面已就绪，可选择设备。")
         }
-    }
-
-    private func tailingOutputSections() -> [SettingsSection] {
-        [
-            SettingsSection("台铃 4.3 寸", footer: "适用于 TL-DASH-V2 仪表。iPhone 加入仪表 Wi-Fi，在「Wi-Fi 与网络」填写该网络信息；开启仪表投屏后启动 CarPlay。请先退出其他投屏 App。", [
-                .field("仪表 IP 地址", tailingAddressField, placeholder: "192.168.1.1")
-            ]),
-            SettingsSection(footer: "仪表输出固定为 480×272、JPEG，最高 20 FPS。本机 CarPlay 使用 H.264、960×544、30 FPS。声音由 iPhone／蓝牙输出；仪表不回传触控。", [.note(tailingStatus)])
-        ]
     }
 
     private func carLifeOutputSections() -> [SettingsSection] {

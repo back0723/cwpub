@@ -2,6 +2,16 @@ import Foundation
 import Network
 import AVFoundation
 
+#if DEBUG
+/// 进程 CPU 秒数，只给接收性能日志用（原先由台铃输出里的诊断工具提供，随台铃代码一起删除）。
+private func processCPUSeconds() -> Double {
+    var usage = rusage()
+    guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
+    return Double(usage.ru_utime.tv_sec) + Double(usage.ru_utime.tv_usec) / 1_000_000
+        + Double(usage.ru_stime.tv_sec) + Double(usage.ru_stime.tv_usec) / 1_000_000
+}
+#endif
+
 /// All listener/session state is confined to queue. UI callbacks are always main-thread.
 final class NativeReceiver {
     private let queue = DispatchQueue(label: "TDSCarKit.receiver")
@@ -15,7 +25,7 @@ final class NativeReceiver {
     private let maximumLocalInFlight = 12
     #if DEBUG
     private var diagnosticStarted = ProcessInfo.processInfo.systemUptime
-    private var diagnosticCPU = TailingPerformanceDiagnostics.cpuTime()
+    private var diagnosticCPU = processCPUSeconds()
     private var diagnosticFrames = 0, diagnosticBytes = 0
     private var diagnosticPreviousArrival: Double?
     private var diagnosticGap = 0.0, diagnosticWork = 0.0, diagnosticMainDelay = 0.0, diagnosticMainWork = 0.0
@@ -25,7 +35,7 @@ final class NativeReceiver {
         diagnosticPreviousArrival = arrival; diagnosticWork = max(diagnosticWork, work)
         let elapsed = arrival - diagnosticStarted
         guard elapsed >= 5 else { return }
-        let cpu = TailingPerformanceDiagnostics.cpuTime()
+        let cpu = processCPUSeconds()
         log(String(format: "接收性能：输入 %.1f FPS / %.0f KiB/s，最大帧间隔 %.0f ms，转发最大 %.1f ms，本机队列 %d，主线程排队/处理最大 %.1f/%.1f ms，CPU %.0f%%（单核100%%），热状态 %d，低电量模式 %d",
             Double(diagnosticFrames) / elapsed, Double(diagnosticBytes) / elapsed / 1024,
             diagnosticGap * 1000, diagnosticWork * 1000, localInFlight,
@@ -72,12 +82,6 @@ final class NativeReceiver {
     private var carLifeGOPCodec: VideoCodec = .h264
     private var carLifeParamSets: [Data] = []
     private let carLifeGOPLimit = 12 * 1024 * 1024
-    private let zeeho = ZeehoOutput()
-    var onZeehoState: ((String) -> Void)?
-    private let ninebot = NinebotOutput()
-    var onNinebotState: ((String) -> Void)?
-    private let tailing = TailingOutput()
-    var onTailingState: ((String) -> Void)?
     private lazy var carLink = CarLinkRelay(queue: queue)
     var onCarLifeState: ((String) -> Void)?
     var onCarLinkState: ((String) -> Void)?
@@ -174,32 +178,6 @@ final class NativeReceiver {
             // 来电暂停/挂断恢复全由 iOS 系统自己管理，App 不插手。
             self.wireBrowserOutput()
             self.displaySize = (configuration.width, configuration.height)
-            if let target = configuration.zeehoAddress {
-                let phone = configuration.tailingPhoneInfo ?? TailingPhoneInfo(package: Bundle.main.bundleIdentifier ?? "CarWithin",
-                    versionCode: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0,
-                    model: "iPhone", systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-                    width: configuration.width, height: configuration.height, rotation: 1)
-                self.zeeho.start(localAddress: configuration.address, targetAddress: target, phone: phone,
-                    onState: { [weak self] in self?.onZeehoState?($0) },
-                    onLog: { [weak self] in self?.log($0) },
-                    requestKeyframe: { [weak self] in self?.requestKeyFrame(reason: "极核解码恢复") })
-            }
-            if let target = configuration.ninebotAddress {
-                self.ninebot.start(localAddress: configuration.address, targetAddress: target,
-                    onState: { [weak self] in self?.onNinebotState?($0) },
-                    onLog: { [weak self] in self?.log($0) },
-                    requestKeyframe: { [weak self] in self?.requestKeyFrame(reason: "九号解码恢复") })
-            }
-            if let target = configuration.tailingAddress {
-                self.tailing.onLog = { [weak self] in self?.log($0) }
-                self.tailing.onState = { [weak self] in self?.onTailingState?($0) }
-                self.tailing.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: "台铃解码恢复") }
-                let phone = configuration.tailingPhoneInfo ?? TailingPhoneInfo(package: Bundle.main.bundleIdentifier ?? "CarWithin",
-                    versionCode: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0,
-                    model: "iPhone", systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-                    width: configuration.width, height: configuration.height, rotation: 1)
-                self.tailing.start(localAddress: configuration.address, targetAddress: target, phone: phone)
-            }
             if configuration.carLifeEnabled {
                 self.carLifeGOP = []; self.carLifeGOPBytes = 0; self.carLifeParamSets = []
                 self.carLife.onLog = { [weak self] in self?.log($0) }
@@ -618,13 +596,10 @@ final class NativeReceiver {
         generation = UUID(); listener?.cancel(); listener = nil
         if !keepingBrowser { videoOutput.stop(); browserRunning = false }
         carLife.stop()
-        zeeho.stop()
-        ninebot.stop()
-        tailing.stop()
         carLink.stop()
         #if DEBUG
         diagnosticStarted = ProcessInfo.processInfo.systemUptime
-        diagnosticCPU = TailingPerformanceDiagnostics.cpuTime()
+        diagnosticCPU = processCPUSeconds()
         diagnosticFrames = 0; diagnosticBytes = 0; diagnosticPreviousArrival = nil
         diagnosticGap = 0; diagnosticWork = 0; diagnosticMainDelay = 0; diagnosticMainWork = 0
         #endif
@@ -794,9 +769,6 @@ final class NativeReceiver {
                     if keyframe { self.keyframeArrived() }
                     // CarLife 模式画面只走 CarLife 协议，不再往车机浏览器推流。
                     if !configuration.carLifeEnabled { self.videoOutput.append(data, codec: codec) }
-                    if configuration.zeehoAddress != nil { self.zeeho.append(data, codec: codec, keyframe: keyframe) }
-                    if configuration.ninebotAddress != nil { self.ninebot.append(data, codec: codec, keyframe: keyframe) }
-                    if configuration.tailingAddress != nil { self.tailing.append(data, codec: codec) }
                     if configuration.carLifeEnabled {
                         // 只留最近一个 GOP：车机后连时靠它从关键帧起连续解码。
                         if keyframe {

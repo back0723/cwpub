@@ -35,10 +35,6 @@ struct ReceiverConfiguration {
     /// 「由 iPhone 输出」：只有它为 true 时，未连上接收端才允许本机播放；
     /// 「随画面传输」连不上时保持静默，不回落到 iPhone。
     var audioLocal = false
-    var zeehoAddress: String?
-    var ninebotAddress: String?
-    var tailingAddress: String?
-    var tailingPhoneInfo: TailingPhoneInfo?
     var carLinkRelayAddress: String?
     static let carLinkRelayPort: UInt16 = 24890
     /// Physical width declared to the iPhone; larger values fit more (smaller) icons per page.
@@ -226,30 +222,6 @@ struct ReceiverConfiguration {
             var parsedCarLife = in_addr()
             guard inet_pton(AF_INET, carLifeAddress, &parsedCarLife) == 1 else {
                 throw ConfigurationError("CarLife 车机 IP 地址无效，请填写 IPv4 地址或留空。")
-            }
-        }
-        if let zeehoAddress {
-            var target = in_addr()
-            guard inet_pton(AF_INET, zeehoAddress, &target) == 1, zeehoAddress != address,
-                  !zeehoAddress.hasPrefix("127."), !zeehoAddress.hasPrefix("0."),
-                  !zeehoAddress.hasPrefix("169.254."), UInt32(bigEndian: target.s_addr) < 0xe0000000 else {
-                throw ConfigurationError("请输入有效的极核仪表 IPv4 地址，与本机 IP 不同。")
-            }
-        }
-        if let ninebotAddress {
-            var target = in_addr()
-            guard inet_pton(AF_INET, ninebotAddress, &target) == 1, ninebotAddress != address,
-                  !ninebotAddress.hasPrefix("127."), !ninebotAddress.hasPrefix("0."),
-                  !ninebotAddress.hasPrefix("169.254."), UInt32(bigEndian: target.s_addr) < 0xe0000000 else {
-                throw ConfigurationError("请输入有效的九号仪表 IPv4 地址，与本机 IP 不同。")
-            }
-        }
-        if let tailingAddress {
-            var target = in_addr()
-            guard inet_pton(AF_INET, tailingAddress, &target) == 1, tailingAddress != address,
-                  !tailingAddress.hasPrefix("127."), !tailingAddress.hasPrefix("0."),
-                  UInt32(bigEndian: target.s_addr) < 0xe0000000 else {
-                throw ConfigurationError("请输入有效的台铃仪表 IPv4 地址，与本机 IP 不同。")
             }
         }
         if let carLinkRelayAddress {
