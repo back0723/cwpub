@@ -109,13 +109,17 @@ final class CarPlayMediaSession {
                     let streamType = type.intValue
                     let route = CarLifeAudioRoute.classify(streamType: streamType, audioType: audioType)
                     CarPlayMediaSession.recordAudioSetup(type: streamType, audioType: audioType)
-                    // 【模仿官方 CarLife：上行交给手机系统通话】车机端不再采集麦克风。
-                    // 官方百度 CarLife 连接车机打电话时是在手机上执行通话、用手机麦克风，车机只投屏
-                    // + 放对方声音。我方旧逻辑只要流带 dataPort 就建 NativeMicrophone 抢上行，与手机
-                    // 系统通话冲突、且采的是运行 App 那台设备的麦（不是人对着说话的手机）→ 对方听不到。
-                    // 现在 microphonePort 恒 nil：不申请麦克风、不建采集、不动 AVAudioSession，
-                    // 通话上行完全留给 iPhone 本机；对方声音仍经本流→车机通道3播出（下行不变）。
-                    let microphonePort: UInt16? = nil
+                    // 【上行端口】iPhone 在 SETUP 里给「要上行」的流都带 dataPort + input=1：
+                    // telephony dataPort=59913、speechrecognition dataPort=49929（1.2 诊断日志实据）。
+                    // 这个端口就是 iPhone 监听的输入口，把采集到的声音经 DataStream-Input 加密后发过去，
+                    // 对方才听得到。只对 telephony 建麦：speechrecognition 是 Siri 的，不需要。
+                    var microphonePort: UInt16?
+                    let hasInput = (stream["input"] as? NSNumber).map { $0.intValue != 0 } ?? false
+                    if route == .voice, audioType == "telephony", hasInput,
+                       let port = (stream["dataPort"] as? NSNumber)?.uint16Value, port > 0, CarPlayAudio.capturesMicrophone {
+                        microphonePort = port
+                    }
+                    onLog?("上行端口：\(microphonePort.map { "\($0)（iPhone 输入口）" } ?? "无")")
                     audio.removeValue(forKey: streamType)?.stop()
                     // 通话流（telephony / speechrecognition）标记 isVoice：CarPlayAudio 据此在本机绝不抢
                     // AVAudioSession 路由（抢了会顶断通话）；对方声音走车机通道3、你的声音由麦克风上行。
