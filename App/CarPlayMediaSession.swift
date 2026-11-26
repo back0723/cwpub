@@ -21,6 +21,10 @@ enum CarLifeAudioRoute: String {
         let kind = audioType.lowercased()
         // 电话 / 语音识别 → 归为 .voice：对方声音送车机通道3、你的声音由麦克风上行回 iPhone。
         if ["telephony", "speechrecognition"].contains(kind) { return .voice }
+        // 【alert 误判】iOS 会用 stream 100 送 audioType=alert（系统提示音、播报起头），
+        // 旧逻辑先看 streamType==100 就归 .voice → 每次提示音都触发「通话开始：已暂停音乐」，
+        // 挂断后又一堆续播判断。提示音/导航类必须先判，再落到 stream 100=电话号码。
+        if ["alert", "navigation", "navi", "tts", "speech", "assistant"].contains(kind) { return .navigation }
         if streamType == 100 { return .voice }
         // 导航播报 / 系统提示 / 语音助手 → 车机独立 TTS 通道 4。
         // 【音乐+导航双双无声根因】CarPlay 的 stream 101（Opus 48000Hz 单声道，audioType=default）
@@ -53,10 +57,36 @@ final class CarPlayMediaSession {
     private var video: MediaTCPConnection?
     private var timing: MediaTiming?
     private var audio: [Int: CarPlayAudio] = [:]
+    /// 换流间隙暂存的车机麦 PCM（16 kHz / 16 bit / 单声道，1 秒 = 32000 字节）。
+    private var vehicleMicBacklog = Data()
+    private static let vehicleMicBacklogLimit = 16_000 * 2
     /// 车机麦 PCM（CarLife 通道 5 / id 0x58001）→ 当前通话流的上行编码链路。
     /// 只有 voice 流对应的 CarPlayAudio 会持有 NativeMicrophone，音乐流拿到会自己忽略。
     func feedVehicleMicrophone(_ pcm: Data) {
-        for output in audio.values { output.feedVehicleMicrophone(pcm) }
+        var delivered = false
+        for output in audio.values where output.hasVehicleUplink {
+            output.feedVehicleMicrophone(pcm)
+            delivered = true
+        }
+        guard !delivered else {
+            if !vehicleMicBacklog.isEmpty { vehicleMicBacklog.removeAll(keepingCapacity: true) }
+            return
+        }
+        // 【换流间隙丢字】旧通话流刚拆、新通话流还没建（1.9 实测 12:18:19–12:18:23）时，
+        // 车机麦 PCM 原来整段丢掉，接通后开头几个字听不见。这里留最近 1 秒，新流一建好就补发。
+        vehicleMicBacklog.append(pcm)
+        if vehicleMicBacklog.count > Self.vehicleMicBacklogLimit {
+            vehicleMicBacklog = Data(vehicleMicBacklog.suffix(Self.vehicleMicBacklogLimit))
+        }
+    }
+
+    /// 新通话流的上行建好后，把换流间隙攒下的车机麦 PCM 补发出去。
+    private func flushVehicleMicBacklog(to output: CarPlayAudio) {
+        guard !vehicleMicBacklog.isEmpty, output.hasVehicleUplink else { return }
+        let backlog = vehicleMicBacklog
+        vehicleMicBacklog.removeAll(keepingCapacity: true)
+        onLog?("车机麦：换流间隙补发 \(backlog.count) 字节 PCM（\(backlog.count / 32) ms）")
+        output.feedVehicleMicrophone(backlog)
     }
     private let audioEnabled: Bool
     private let hevc: Bool
@@ -159,6 +189,7 @@ final class CarPlayMediaSession {
                         output.onBrowserAudio = { buffer, stamp in onBrowserAudio(streamType, buffer, stamp) }
                     }
                     audio[streamType] = output
+                    if isVoice { flushVehicleMicBacklog(to: output) }
                     replies.append(["type": type, "dataPort": output.dataPort, "controlPort": output.controlPort,
                                     "streamConnectionID": connectionID])
                     let routeText: String
