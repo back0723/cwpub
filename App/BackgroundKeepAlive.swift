@@ -25,6 +25,8 @@ final class BackgroundKeepAlive {
     private var watchdog: Timer?
     private var restarts = 0
     private var lastReviveAt = Date.distantPast
+    /// 通话中"不动会话"的保活重试连续失败次数；每失败 3 次才允许碰一次 setActive。
+    private var callFailures = 0
     /// 音频中断（来电/微信/FaceTime）期间为 true。微信 VoIP 不一定把
     /// isOtherAudioPlaying 置 true，光靠那个标志拦不住 revive，必须自己记状态。
     private var interrupted = false
@@ -46,23 +48,22 @@ final class BackgroundKeepAlive {
         Self.setHolding(true)
         interrupted = false
         guard play(reason: nil) else { Self.setHolding(false); return false }
-        isRunning = true; restarts = 0
+        isRunning = true; restarts = 0; callFailures = 0
         let center = NotificationCenter.default
         observers = [
             center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
                 guard let self, let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                       let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
                 if type == .began {
-                    // 来电 / 微信语音 / FaceTime：先暂停，但不放弃音频会话。
-                    // 一旦让出，iOS 约 10 秒后就挂起 App，CarLife 与 CarPlay 一起断。
+                    // 通话（来电 / 微信语音 / FaceTime）会打断我们的静音播放。旧逻辑这里直接把播放器
+                    // pause、revive 又被 interrupted 拦住 → 一点音频都没有 → iOS 约 10 秒后挂起 App →
+                    // CarLife 的 TCP 连接和 RTSP 监听器一起失效 → 车机画面断开
+                    //（09:40:32~09:40:51 日志整段空白，随后 DefunctConnection）。
+                    // 现在反向处理：静音音轨（volume 0 + mixWithOthers）继续走，只做"恢复播放"重试，
+                    // 全程不 setCategory、不 overrideOutputAudioPort、不抢麦，把会话让给系统通话。
                     self.interrupted = true
-                    self.player?.pause()
-                    self.onLog?("通话占用了音频，暂停后台保活重试（不抢麦、不碰路由，让手机系统通话稳定进行）")
-                    // 仍在 0.8 秒后尝试一次；但 revive() 内会检查 isOtherAudioPlaying，
-                    // 通话未结束时直接跳过，避免搅乱手机系统通话的音频会话。通话结束后由"中断结束"事件恢复。
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                        self?.revive(reason: "通话中断后重试")
-                    }
+                    self.onLog?("通话占用了音频，改用静音音轨保活（不改分类、不改路由、不抢麦）")
+                    self.scheduleCallRetry(attempt: 1)
                     return
                 }
                 // Resume whether or not iOS sets shouldResume: staying silent means being suspended.
@@ -101,6 +102,35 @@ final class BackgroundKeepAlive {
         onLog?("后台保持已关闭")
     }
 
+    /// 通话期间的保活重试：优先"只让静音音轨继续播放"，绝不碰会话设置。
+    /// 连续失败 3 次才允许碰一次 setActive（通话中断会把会话置为非活动，这一次是唯一能让
+    /// App 不被挂起的办法）。通话结束后由"中断结束"事件恢复正常保活。
+    private func scheduleCallRetry(attempt: Int) {
+        guard isRunning, interrupted, attempt < 100_000 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.isRunning, self.interrupted else { return }
+            if self.player?.isPlaying != true {
+                self.lastReviveAt = Date()
+                self.restarts += 1
+                var ok = self.play(reason: nil, touchingSession: false)
+                if ok {
+                    self.callFailures = 0
+                } else {
+                    self.callFailures += 1
+                    if self.callFailures % 3 == 0 {
+                        ok = self.play(reason: nil, touchingSession: true)
+                        if ok { self.callFailures = 0 }
+                    }
+                }
+                if attempt <= 3 || attempt % 5 == 0 {
+                    self.onLog?(ok ? "通话中静音保活恢复成功（第 \(attempt) 次）"
+                                   : "通话中静音保活恢复失败（第 \(attempt) 次）")
+                }
+            }
+            self.scheduleCallRetry(attempt: attempt + 1)
+        }
+    }
+
     private func revive(reason: String) {
         guard isRunning else { return }
         // 【通话期间不抢会话】通话/微信语音占用期间绝不 revive。
@@ -121,21 +151,23 @@ final class BackgroundKeepAlive {
         }
     }
 
-    private func play(reason: String?) -> Bool {
+    private func play(reason: String?, touchingSession: Bool = true) -> Bool {
         do {
             let session = AVAudioSession.sharedInstance()
             if reason == nil {
                 onLog?("后台保持准备：类别 \(session.category.rawValue)，模式 \(session.mode.rawValue)，选项 \(session.categoryOptions.rawValue)，路由 \(session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","))")
             }
-            if session.category != .playback && session.category != .playAndRecord {
-                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            } else if session.category == .playback && !session.categoryOptions.contains(.mixWithOthers) {
-                // CarPlay playback may have selected this category without mixing. Silent
-                // keep-alive must not request exclusive audio focus from the source iPhone.
-                try session.setCategory(.playback, mode: session.mode,
-                                        options: session.categoryOptions.union(.mixWithOthers))
+            if touchingSession {
+                if session.category != .playback && session.category != .playAndRecord {
+                    try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+                } else if session.category == .playback && !session.categoryOptions.contains(.mixWithOthers) {
+                    // CarPlay playback may have selected this category without mixing. Silent
+                    // keep-alive must not request exclusive audio focus from the source iPhone.
+                    try session.setCategory(.playback, mode: session.mode,
+                                            options: session.categoryOptions.union(.mixWithOthers))
+                }
+                try session.setActive(true)
             }
-            try session.setActive(true)
             let player = try player ?? AVAudioPlayer(data: Self.silentWAV)
             player.numberOfLoops = -1
             player.volume = 0
