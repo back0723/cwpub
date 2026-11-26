@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.9.2-ycarwith"
+    static let version = "1.9.3-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -209,14 +209,15 @@ const oldBrowser=chromeVer>0&&chromeVer<60;
 // path, and its MSE decoder routinely never produces a frame without a fresh IDR. JPEG needs
 // neither, so make it the default there; ?mse=1 still forces MSE for troubleshooting.
 const noWebCodecs=!canWebCodecs&&!/[?&]mse=1/.test(location.search);
-// 老车机（Chromium 53 / Crosswalk）同样有 MediaSource，H.264 走系统 MediaCodec 硬解：
-// 1922×858 全分辨率几乎不吃 CPU。而 JPEG 兼容画面要在 armv7 上软解 1280×540 的每帧 JPEG
-// 再 drawImage，1GB 内存的车机扛不住（15fps 也就勉强），所以默认先走 MSE 硬解；
-// 只有 MSE 真的不可用（!canMSE）或实测首帧超时（见 armFirstFrameTimer）才退 JPEG。
+// 实测结论（HK1 车机 / Chrome 53 / Crosswalk 23，1922×858）：老车机走 MSE 硬解必卡死——
+// iPhone 不管要多少分辨率都发 H.264 High profile（avc1.640028/64002A），这颗老 MediaCodec
+// 解不动：先是「播放停滞」「延迟过高」反复跳关键帧，8 秒左右必定 MEDIA_ERR_DECODE，页面重连黑屏。
+// JPEG 兼容画面每帧都是一张完整图，不依赖 IDR、不依赖硬解，就是 CarMode 2.5 的老车机方案，
+// 所以 Chromium < 60 的车机浏览器默认直接走 JPEG；?mse=1 仍可强制 MSE 用于排查。
 const forcedJPEG=/[?&]jpeg=1/.test(location.search);
 const forcedMSE=/[?&]mse=1/.test(location.search);
 const rememberedJPEG=preference('sessionStorage','carwithin.jpeg')==='1';
-let useJPEG=forcedJPEG||!canMSE||(!forcedMSE&&rememberedJPEG);
+let useJPEG=forcedJPEG||!canMSE||(!forcedMSE&&(rememberedJPEG||oldBrowser));
 // ?mse=1 forces the compatibility decoder (troubleshooting).
 // Automatic mode remembers, for this browser session, that WebCodecs kept hitching here.
 let useWebCodecs=!useJPEG&&canWebCodecs&&!/[?&]mse=1/.test(location.search)&&preference('sessionStorage','carwithin.mse')!=='1';
