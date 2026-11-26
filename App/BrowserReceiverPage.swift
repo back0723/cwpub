@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.9.3-ycarwith"
+    static let version = "1.9.4-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -31,7 +31,7 @@ enum BrowserReceiverPage {
 <title>Carplay</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#05070b;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
-main{position:relative;width:100%;height:100%}video,canvas{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
+main{position:relative;width:100%;height:100%}video,canvas,img#pic{position:absolute;left:0;top:0;right:0;bottom:0;width:100%;height:100%;object-fit:contain;background:#000;pointer-events:none}
 /* 车机是 Chromium 53：inset:0 要 Chrome 87 才支持，写了等于没写 → #touch 没有宽高、变成 0×0，
    手指全落在它外面，页面一辈子收不到 touchstart，这就是"车机上完全点不动"的真因。
    一律改成 left/top/right/bottom + width/height。 */
@@ -86,7 +86,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 [hidden]{display:none!important}
 </style>
 </head>
-<body><main><video id="video" muted autoplay playsinline disablepictureinpicture disableremoteplayback></video><canvas id="view" hidden></canvas><canvas id="hold" hidden></canvas><div id="touch"></div></main>
+<body><main><video id="video" muted autoplay playsinline disablepictureinpicture disableremoteplayback></video><canvas id="view" hidden></canvas><img id="pic" alt="" hidden><canvas id="hold" hidden></canvas><div id="touch"></div></main>
 <div id="top"><div id="status" class="badge"><span class="dot"></span><span>正在连接 Carplay…</span></div><div class="toolbar">
   <button id="menuBtn" hidden>菜单</button>
   <div id="menuPanel" hidden>
@@ -123,7 +123,7 @@ main{position:relative;width:100%;height:100%}video,canvas{position:absolute;lef
 const PAGE_VERSION='\#(version)';
 const connectionProtocol=location.protocol==='https:'?'HTTPS':'HTTP';
 const $=s=>document.querySelector(s);
-const video=$('#video'),view=$('#view'),hold=$('#hold'),touchLayer=$('#touch'),statusEl=$('#status'),label=statusEl.querySelector('span:last-child'),statsEl=$('#stats'),fastLink=$('#fast');
+const video=$('#video'),view=$('#view'),pic=$('#pic'),hold=$('#hold'),touchLayer=$('#touch'),statusEl=$('#status'),label=statusEl.querySelector('span:last-child'),statsEl=$('#stats'),fastLink=$('#fast');
 const MS=(/iPhone|iPad|iPod/.test(navigator.userAgent)&&window.ManagedMediaSource)||window.MediaSource||window.ManagedMediaSource;
 const managedMSE=!!MS&&MS===window.ManagedMediaSource;
 const startPlayback=$('#startPlayback'),enableAudio=$('#enableAudio');const startCard=$('#startCard'),startBtn=$('#startBtn');
@@ -240,43 +240,51 @@ function hitch(reason){
 }
 const debug=/[?&]debug=1/.test(location.search);let debugTick=0,received=0;
 let ws=null,fmt=null,shown=false,receiverReady=false,attempt=0,retryTimer=0,firstFrameTimer=0,lastKeyRequest=0,idleTimer=0,bytesIn=0;
-// JPEG compatibility rendering: one complete picture per packet, drawn on the 2D canvas `view`.
-let jpegPainting=false,jpegQueued=null,jpegFrames=0,jpegCtx=null,jpegTimeouts=0;
-// 兼容画面多宽由这台车机自己说了算：它是 2015 年的 Android 4.2（CM8049），JPEG 全靠软解，
-// 每帧 drawImage 还要放大到 1922 宽。这里实测自己吃到多少帧，低于 10 fps 就请服务端降一档，
-// 比例由画面计划保证，不会拉变形——用数字调，不靠猜。
-let JPEG_WIDTHS=[1280,1152,1024,896,768],jpegAskIndex=0,jpegStamps=[],lastJpegReport=0;
+// JPEG compatibility rendering: one complete picture per packet, shown by swapping an <img>.
+// 老车机（Chromium 53 / Android 4.2）上把整帧画进 canvas、再让 canvas 放大到 1922 宽，每帧都
+// 要多做一次全屏软件 blit，实测只有 1~4 fps；直接把图换到 <img> 上，缩放交给浏览器合成器做，
+// CarMode 2.5 走的也是这条路。
+let jpegPainting=false,jpegQueued=null,jpegFrames=0,jpegUrlPrev=null,jpegStartAt=0,jpegTimeouts=0;
+// 兼容画面多宽由这台车机自己说了算：实测自己吃到多少帧，不够就请服务端降一档，富裕就升回去。
+// 刚接上的 10 秒里全是关键帧、伴音、首屏的抖动，这段不参与判断，否则一上来就连降四档、画面糊掉。
+let JPEG_WIDTHS=[1280,1120,1024,960],jpegAskIndex=0,jpegStamps=[],lastJpegReport=0,lastJpegAsk=0;
+pic.onload=function(){
+ received++;
+ if(!jpegStartAt)jpegStartAt=performance.now();
+ jpegFrames++;firstFrame();
+ jpegStamps.push(performance.now());if(jpegStamps.length>200)jpegStamps.shift();
+};
+pic.onerror=function(){report('info','JPEG 图片解码失败')};
 setInterval(function(){
- if(!useJPEG||!shown)return;
- const now=performance.now(),recent=jpegStamps.filter(t=>now-t<5000);
- if(recent.length<3)return;
+ if(!useJPEG||!shown||!jpegStartAt)return;
+ const now=performance.now();
+ if(now-jpegStartAt<10000)return;
+ if(now-lastJpegAsk<4000)return;
+ const recent=jpegStamps.filter(t=>now-t<5000);
+ if(recent.length<6)return;
  const fps=recent.length/5;
- if(fps<10&&jpegAskIndex<JPEG_WIDTHS.length-1){
-  jpegAskIndex++;
+ if(fps<7&&jpegAskIndex<JPEG_WIDTHS.length-1){
+  jpegAskIndex++;lastJpegAsk=now;jpegStamps=[];
   const w=JPEG_WIDTHS[jpegAskIndex];
-  jpegStamps=[];lastJpegReport=now;
   send({type:'jpegScale',width:w});
   report('info','JPEG 实测 '+fps.toFixed(1)+' fps，兼容画面宽度降到 '+w);
- }else if(fps>=10&&now-lastJpegReport>15000){
+ }else if(fps>=13&&jpegAskIndex>0){
+  jpegAskIndex--;lastJpegAsk=now;jpegStamps=[];
+  const w=JPEG_WIDTHS[jpegAskIndex];
+  send({type:'jpegScale',width:w});
+  report('info','JPEG 实测 '+fps.toFixed(1)+' fps，兼容画面宽度升回 '+w);
+ }else if(now-lastJpegReport>20000){
   lastJpegReport=now;
-  report('info','JPEG 实测 '+fps.toFixed(1)+' fps（'+view.width+'×'+view.height+'）');
+  report('info','JPEG 实测 '+fps.toFixed(1)+' fps（'+((pic.naturalWidth||view.width)+'×'+(pic.naturalHeight||view.height))+'）');
  }
 },2000);
 function paintJPEG(bytes){
  if(bytes.length<2)return;
- if(jpegPainting){jpegQueued=bytes.slice();return}
+ // 最新一帧赢：上一张还没显示完就直接换掉，慢的时候自然降帧率，不排队积压。
  const url=URL.createObjectURL(new Blob([bytes.subarray(1)],{type:'image/jpeg'}));
- jpegPainting=true;const img=new Image();
- img.onload=function(){
-  URL.revokeObjectURL(url);
-  if(view.width!==img.naturalWidth||view.height!==img.naturalHeight){view.width=img.naturalWidth;view.height=img.naturalHeight}
-  if(!jpegCtx)jpegCtx=view.getContext('2d',{alpha:false});
-  jpegCtx.drawImage(img,0,0);jpegFrames++;received++;firstFrame();
-  jpegStamps.push(performance.now());if(jpegStamps.length>200)jpegStamps.shift();
-  jpegPainting=false;const next=jpegQueued;jpegQueued=null;if(next)paintJPEG(next);
- };
- img.onerror=function(){URL.revokeObjectURL(url);jpegPainting=false;const next=jpegQueued;jpegQueued=null;if(next)paintJPEG(next)};
- img.src=url;
+ const old=jpegUrlPrev;jpegUrlPrev=url;
+ pic.src=url;pic.hidden=false;
+ if(old)setTimeout(function(){URL.revokeObjectURL(old)},2000);
 }
 // Clock sync with CarWithin (µs): offset = server − client, best of the lowest-RTT samples.
 let clockOffset=null,bestRtt=Infinity,bestAt=0,latencies=[];
@@ -464,7 +472,7 @@ function restart(reason,notify=true){
  retryTimer=setTimeout(()=>{retryTimer=0;boot()},delay);
 }
 function boot(){
- video.hidden=useWebCodecs||useJPEG;view.hidden=!(useWebCodecs||useJPEG);
+ video.hidden=useWebCodecs||useJPEG;view.hidden=!useWebCodecs;if(!useJPEG)pic.hidden=true;
  window.carWithinPlayerBooted=true;
  if(typeof WebSocket!=='function'){setStatus('此浏览器缺少 WebSocket。请更新车机浏览器或 Android System WebView。','bad');return}
  if(useJPEG){connect();return}
@@ -801,9 +809,8 @@ setInterval(()=>{
 // ---------- input ----------
 const fingers=new Map();let nextFingerId=0;
 function picture(){
- const canvasMode=useWebCodecs||useJPEG;
- const el=canvasMode?view:video,r=el.getBoundingClientRect();
- const vw=(canvasMode?view.width:video.videoWidth)||16,vh=(canvasMode?view.height:video.videoHeight)||9;
+ const el=useJPEG?pic:useWebCodecs?view:video,r=el.getBoundingClientRect();
+ const vw=(useJPEG?pic.naturalWidth:useWebCodecs?view.width:video.videoWidth)||16,vh=(useJPEG?pic.naturalHeight:useWebCodecs?view.height:video.videoHeight)||9;
  const s=Math.min(r.width/vw,r.height/vh),w=vw*s,h=vh*s;return{x0:r.left+(r.width-w)/2,y0:r.top+(r.height-h)/2,w,h}
 }
 function sendFingers(){
