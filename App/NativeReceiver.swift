@@ -186,6 +186,10 @@ final class NativeReceiver {
                 self.carLife.onControl = { [weak self] in self?.press($0) }
                 self.carLife.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
                 self.carLife.onStartFrameNeeded = { [weak self] in self?.sendCachedCarLifeKeyFrame() }
+                // 车机麦：通道 5（id 0x58001）的 PCM 直接喂给当前通话流的上行链路。
+                self.carLife.onVehicleMicrophonePCM = { [weak self] pcm in
+                    self?.activeMedia?.feedVehicleMicrophone(pcm)
+                }
                 self.carLife.start(targetAddress: configuration.carLifeAddress, width: configuration.width,
                                    height: configuration.height, fps: configuration.maxFPS)
             }
@@ -404,6 +408,9 @@ final class NativeReceiver {
         callMutedAt = Date()
         lastLoggedMuteSecond = 0
         loggedKeepAliveLoss = false
+        // 【车机麦开关】通话一建立就请求车机开麦（通道 1 0x10024）。不发这条命令，车机的
+        // AudioRecord 根本不会启动 —— 这就是之前「有硬件麦却零入站」的真因。
+        carLife.startVehicleMicrophone()
         // 【续播判据改成「通话前真的有声」】以前只看 assumedPlaying，这个标志会被断开暂停、
         // playPause 切换等各种路径写成 false，导致通话结束后不敢补播放键 → 用户看到「原来在放的
         // 音乐，通话后不放了」。现在再加一条硬证据：最近 5 秒内收到过非静音音乐 PCM。
@@ -423,6 +430,8 @@ final class NativeReceiver {
     private func endCallOnQueue() {
         guard CarPlayAudio.outputMuted else { return }
         CarPlayAudio.outputMuted = false
+        // 通话结束：让车机停止采麦，释放车机硬件麦。
+        carLife.stopVehicleMicrophone()
         guard wasPlayingBeforeCall, let media = activeMedia else {
             wasPlayingBeforeCall = false
             return
