@@ -2035,7 +2035,7 @@ extension ReceiverViewController {
     private func aboutLinks() -> [SettingsRow] {
         // 去掉了"检查更新 / 版本记录"：这个共存版不联网查版本。
         [
-            .externalLink("GitHub 项目", icon: ("chevron.left.forwardslash.chevron.right", .systemIndigo)) {
+            .externalLink("CarWithin 原项目（GPL-3.0）", icon: ("chevron.left.forwardslash.chevron.right", .systemIndigo)) {
                 UIApplication.shared.open(Self.projectURL)
             }
         ]
@@ -2765,7 +2765,7 @@ extension ReceiverViewController {
         page("关于") { [unowned self] in
             [
                 SettingsSection([.view(self.aboutIdentityCard())]),
-                SettingsSection(footer: "Copyright © 2026 xmz28", self.aboutLinks())
+                SettingsSection(footer: "基于 CarWithin（xmz28）修改 · GPL-3.0 · Copyright © 2026 xmz28", self.aboutLinks())
             ]
         }
     }
@@ -2774,7 +2774,10 @@ extension ReceiverViewController {
         let info = Bundle.main.infoDictionary ?? [:]
         let primaryIcon = (info["CFBundleIcons"] as? [String: Any])?["CFBundlePrimaryIcon"] as? [String: Any]
         let iconName = (primaryIcon?["CFBundleIconFiles"] as? [String])?.first
-        let image = iconName.flatMap { UIImage(named: $0) } ?? Self.carButtonIcon.flatMap { UIImage(data: $0) }
+        // 优先用资源目录里的 AppIcon（与桌面图标一致），再退回 Info.plist 的图标列表和内置车标。
+        let image = UIImage(named: "AppIcon")
+            ?? iconName.flatMap { UIImage(named: $0) }
+            ?? Self.carButtonIcon.flatMap { UIImage(data: $0) }
         let icon = UIImageView(image: image)
         icon.contentMode = .scaleAspectFit
         icon.layer.cornerRadius = 17
@@ -2786,7 +2789,10 @@ extension ReceiverViewController {
             icon.heightAnchor.constraint(equalTo: icon.widthAnchor)
         ])
         let name = UILabel()
-        name.text = "CarWithin"
+        // 名称跟随 Info.plist 的 CFBundleDisplayName（当前为 Carplay），不再写死旧项目名。
+        name.text = (info["CFBundleDisplayName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (info["CFBundleName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? "Carplay"
         name.font = .preferredFont(forTextStyle: .title2)
         name.adjustsFontForContentSizeCategory = true
         name.accessibilityTraits.insert(.header)
@@ -2796,7 +2802,7 @@ extension ReceiverViewController {
         version.textColor = .secondaryLabel
         version.adjustsFontForContentSizeCategory = true
         let introduction = UILabel()
-        introduction.text = "在 iPhone 上启动 CarPlay，通过浏览器或兼容的 CarLife 车机查看和操控。"
+        introduction.text = "在这台 iPhone 上启动 CarPlay，把画面和声音送到车机：浏览器、CarLife（无线）或 AirPlay。"
         introduction.font = .preferredFont(forTextStyle: .subheadline)
         introduction.textColor = .secondaryLabel
         introduction.adjustsFontForContentSizeCategory = true
