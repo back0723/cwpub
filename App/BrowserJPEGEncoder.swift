@@ -39,6 +39,10 @@ final class BrowserJPEGEncoder {
     /// JPEG per frame slowly; 1280 keeps the picture usable with a much cheaper decode.
     private let maximumWidth: CGFloat
     private var lastEmitUs: UInt64 = 0
+    /// Frames dropped because no decoder existed yet; logged throttled to keep the log readable.
+    private var droppedWhileUnready = 0
+    /// First JPEG actually produced, logged once per decoder lifetime as end-to-end proof.
+    private var loggedFirstJPEG = false
 
     /// Called on `queue` with a complete JPEG (no leading opcode). The server adds its own header.
     var onJPEG: ((Data) -> Void)?
@@ -67,7 +71,11 @@ final class BrowserJPEGEncoder {
     /// Reconfigure the decoder when SPS/PPS change. Safe to call with the same parameters.
     func configure(parameters newParameters: VideoParameterSets) {
         queue.async {
-            guard newParameters.isComplete, newParameters != self.parameters else { return }
+            guard newParameters.isComplete else {
+                self.onLog?("JPEG 解码器暂不能配置：参数集不完整（SPS \(newParameters.sps?.count ?? 0) / PPS \(newParameters.pps?.count ?? 0)）")
+                return
+            }
+            guard newParameters != self.parameters else { return }
             self.parameters = newParameters
             self.rebuildSessionLocked(newParameters)
         }
@@ -77,7 +85,18 @@ final class BrowserJPEGEncoder {
     /// i.e. the same buffer the MSE/WebCodecs path uses. Frames are newest-wins while busy.
     func enqueue(_ sample: Data, keyframe: Bool) {
         queue.async {
-            guard self.session != nil else { return }
+            // A compatibility viewer can connect long after the configuration record, and a
+            // stream reset can drop it: recover SPS/PPS from the access unit itself so the JPEG
+            // path can never stay silent just because configure() was never reached.
+            if self.session == nil { self.adoptLocked(from: sample) }
+            guard self.session != nil else {
+                self.droppedWhileUnready += 1
+                if self.droppedWhileUnready == 1 || self.droppedWhileUnready % 90 == 0 {
+                    self.onLog?("JPEG 兼容未就绪：还没有可用的 SPS/PPS，已丢弃 \(self.droppedWhileUnready) 帧")
+                }
+                return
+            }
+            self.droppedWhileUnready = 0
             if self.decoding {
                 self.pending = sample
                 self.pendingKeyframe = keyframe
@@ -85,6 +104,47 @@ final class BrowserJPEGEncoder {
             }
             self.submitLocked(sample, keyframe: keyframe)
         }
+    }
+
+    /// Reads the 4-byte length-prefixed NAL units of one access unit and, when it carries
+    /// parameter sets, rebuilds the decoder from them.
+    private func adoptLocked(from sample: Data) {
+        let bytes = [UInt8](sample)
+        var offset = 0
+        var units: [UInt8: Data] = [:]
+        var codec: VideoCodec?
+        while offset + 4 <= bytes.count {
+            let length = (Int(bytes[offset]) << 24) | (Int(bytes[offset + 1]) << 16)
+                       | (Int(bytes[offset + 2]) << 8) | Int(bytes[offset + 3])
+            offset += 4
+            guard length > 0, length <= bytes.count - offset else { return }
+            let unit = Data(bytes[offset..<(offset + length)])
+            offset += length
+            guard let first = unit.first else { continue }
+            let h264 = first & 0x1f
+            let h265 = (first >> 1) & 0x3f
+            if h264 == 7 { units[7] = unit; codec = .h264 }
+            else if h264 == 8 { units[8] = unit; codec = codec ?? .h264 }
+            else if h265 == 32 { units[32] = unit; codec = codec ?? .h265 }
+            else if h265 == 33 { units[33] = unit; codec = codec ?? .h265 }
+            else if h265 == 34 { units[34] = unit; codec = codec ?? .h265 }
+        }
+        guard let codec else { return }
+        let sets: VideoParameterSets
+        switch codec {
+        case .h264:
+            guard let sps = units[7], let pps = units[8] else { return }
+            sets = VideoParameterSets(codec: .h264, sps: sps, pps: pps)
+        case .h265:
+            guard let vps = units[32], let sps = units[33], let pps = units[34] else { return }
+            sets = VideoParameterSets(codec: .h265, vps: vps, sps: sps, pps: pps)
+        }
+        if sets != parameters {
+            parameters = sets
+            onLog?("JPEG 兼容：从访问单元补齐参数集（\(codec.displayName) SPS \(sets.sps?.count ?? 0) / PPS \(sets.pps?.count ?? 0)）")
+        }
+        rebuildSessionLocked(sets)
+        if session != nil { onLog?("JPEG 兼容解码器已建立（\(codec.displayName)）") }
     }
 
     /// Tear down the decoder. Called when no JPEG viewer remains.
@@ -99,6 +159,8 @@ final class BrowserJPEGEncoder {
             self.parameters = nil
             self.pending = nil
             self.decoding = false
+            self.droppedWhileUnready = 0
+            self.loggedFirstJPEG = false
         }
     }
 
@@ -114,7 +176,10 @@ final class BrowserJPEGEncoder {
         let status: OSStatus
         switch parameters.codec {
         case .h264:
-            guard let sps = parameters.sps, let pps = parameters.pps else { return }
+            guard let sps = parameters.sps, let pps = parameters.pps else {
+                onLog?("JPEG 解码器缺少 H.264 参数集（SPS \(parameters.sps?.count ?? 0) / PPS \(parameters.pps?.count ?? 0)）")
+                return
+            }
             let sets = [sps as NSData, pps as NSData]
             var pointers = sets.map { $0.bytes.assumingMemoryBound(to: UInt8.self) }
             var sizes = sets.map(\.length)
@@ -123,7 +188,10 @@ final class BrowserJPEGEncoder {
                 parameterSetPointers: &pointers, parameterSetSizes: &sizes,
                 nalUnitHeaderLength: 4, formatDescriptionOut: &description)
         case .h265:
-            guard let vps = parameters.vps, let sps = parameters.sps, let pps = parameters.pps else { return }
+            guard let vps = parameters.vps, let sps = parameters.sps, let pps = parameters.pps else {
+                onLog?("JPEG 解码器缺少 H.265 参数集（VPS \(parameters.vps?.count ?? 0) / SPS \(parameters.sps?.count ?? 0) / PPS \(parameters.pps?.count ?? 0)）")
+                return
+            }
             let sets = [vps as NSData, sps as NSData, pps as NSData]
             var pointers = sets.map { $0.bytes.assumingMemoryBound(to: UInt8.self) }
             var sizes = sets.map(\.length)
@@ -132,7 +200,10 @@ final class BrowserJPEGEncoder {
                 parameterSetPointers: &pointers, parameterSetSizes: &sizes,
                 nalUnitHeaderLength: 4, extensions: nil, formatDescriptionOut: &description)
         }
-        guard status == noErr, let description else { return }
+        guard status == noErr, let description else {
+            onLog?("JPEG 解码器建立失败：参数集无法生成格式描述（OSStatus \(status)）")
+            return
+        }
         formatDescription = description
 
         callbackBox.output = { [weak self] buffer in
@@ -165,7 +236,10 @@ final class BrowserJPEGEncoder {
             allocator: kCFAllocatorDefault, formatDescription: description,
             decoderSpecification: nil, imageBufferAttributes: attributes as CFDictionary,
             outputCallback: &record, decompressionSessionOut: &created)
-        guard createStatus == noErr, let created else { return }
+        guard createStatus == noErr, let created else {
+            onLog?("JPEG 解码器建立失败：VTDecompressionSessionCreate 返回 \(createStatus)")
+            return
+        }
         _ = VTSessionSetProperty(created, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         session = created
         decoding = false
@@ -216,6 +290,11 @@ final class BrowserJPEGEncoder {
             flags: [._EnableAsynchronousDecompression, ._1xRealTimePlayback],
             frameRefcon: nil, infoFlagsOut: &infoFlags)
         if decodeStatus != noErr {
+            let now = DispatchTime.now().uptimeNanoseconds / 1000
+            if now - lastErrorUs > 2_000_000 {
+                lastErrorUs = now
+                onLog?("JPEG 提交解码失败（\(decodeStatus)），等待下一关键帧")
+            }
             decoding = false
             drainPendingLocked()
         }
@@ -242,7 +321,18 @@ final class BrowserJPEGEncoder {
             CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): quality
         ]
         guard let jpeg = try? ciContext.jpegRepresentation(of: image, colorSpace: colorSpace,
-                                                           options: options) else { return }
+                                                           options: options) else {
+            let now = DispatchTime.now().uptimeNanoseconds / 1000
+            if now - lastErrorUs > 2_000_000 {
+                lastErrorUs = now
+                onLog?("JPEG 编码失败：CIContext 未能生成 JPEG")
+            }
+            return
+        }
+        if !loggedFirstJPEG {
+            loggedFirstJPEG = true
+            onLog?("JPEG 兼容画面已送出：\(Int(image.extent.width))×\(Int(image.extent.height))，首帧 \(jpeg.count) 字节")
+        }
         onJPEG?(jpeg)
     }
 
