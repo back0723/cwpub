@@ -28,7 +28,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let openNetworkSwitch = UISwitch()
     private enum SoundOutput: Int, CaseIterable {
         // Retain the persisted values so the existing Wi-Fi preference survives this change.
-        case carWithin = 0, phone = 1, browser = 2, bluetooth = 3
+        case carWithin = 0, phone = 1, wifi = 2, bluetooth = 3
 
         var title: String { ["在接收设备上播放", "由 iPhone 输出", "随画面传输（Wi-Fi）", "车机蓝牙（Bluetooth）"][rawValue] }
 
@@ -36,20 +36,19 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             switch self {
             case .carWithin: return "声音由当前接收设备播放，例如 iPad 的扬声器。"
             case .phone: return "用 iPhone 当前的声音输出。想让车机出声，请先配对并选中车机蓝牙。"
-            case .browser: return "声音随画面走 Wi‑Fi：由车机 CarLife 端播放。"
+            case .wifi: return "声音随画面走 Wi‑Fi：由车机 CarLife 端播放。"
             case .bluetooth: return "iPhone 先用蓝牙连上车机（车机蓝牙音乐），声音就从车机喇叭出。车机没开蓝牙音乐时会退回 iPhone 扬声器。"
             }
         }
     }
     /// 声音输出不持久化：每次启动都默认「随画面传输（Wi‑Fi）」；
-    /// CarLife 模式可临时切到「由 iPhone 输出」，浏览器模式只有「随画面传输」。
-    private var selectedSoundOutput: SoundOutput = .browser
+    /// CarLife 模式可临时切到「由 iPhone 输出」；声音固定「随画面传输（Wi‑Fi）」为主。
+    private var selectedSoundOutput: SoundOutput = .wifi
     private var receivesAudioFromAnotherDevice: Bool { modeControl.selectedSegmentIndex == 0 }
     private var soundOutput: SoundOutput {
         // 声音固定「随画面传输（Wi‑Fi）」，没有其它输出方式。
-        .browser
+        .wifi
     }
-    private let videoOutputSwitch = UISwitch()
     /// CarLife 模式：把解码后的 PCM 送进车机端的伴音通道（车机喇叭出声）。
     private let carLifeAudioSwitch = UISwitch()
     /// 导航播报时把音乐压低 50% 的开关（设置 → CarPlay → 声音）。
@@ -58,20 +57,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let telephonySwitch = UISwitch()
     /// 要不要在 /info 里向 iPhone 声明音频能力。
     /// CarMode 的日志是"音频开启"才拿到 110 屏幕流；我们回 viewAreas 之后 iPhone 只发三种音频/时钟
-    /// 资源就不再发 SETUP(streams)，所以浏览器输出这条路即便声音选"手机"也必须声明音频能力，
+    /// 资源就不再发 SETUP(streams)，所以即便声音选"手机"
     /// 否则 iPhone 不回第二条带 streams 的 SETUP，车机永远等不到画面。声音仍按"声音输出"走。
     private var declaresAudio: Bool {
-        // CarLife 这条路和浏览器一样必须声明音频能力：`soundOutput` 在 CarLife 模式下恒为
+        // CarLife 这条路必须声明音频能力
         // .phone（声音不上车机），以前因此没有音频位，日志显示“音频已关闭”，iPhone 就只回
         // 资源通知、不发第二条带 streams 的 SETUP，车机永远“等待关键帧”。声音路由不受影响。
-        if outputMode == .browser || outputMode == .carLife { return true }
+        if outputMode == .carLife { return true }
         return soundOutput != .phone
     }
     private let videoOutputPortField = UITextField()
-    private let secureVideoOutputPortField = UITextField()
-    private let httpsDomainField = UITextField()
-    private let httpsTokenField = UITextField()
-    private let httpsStatus = StatusLabel()
     private let portStatus = StatusLabel()
     private let pictureInPictureButton = UIButton(type: .system)
     private let driveControl = ChoiceMenu(items: ["左舵", "右舵"])
@@ -93,13 +88,10 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private let aspectRatioControl = ChoiceMenu(items: ["预设比例"] + ReceiverConfiguration.aspectRatios.map(\.title))
     private let resolutionControl = ChoiceMenu(items: ReceiverConfiguration.resolutions.map { "\($0.label)（\($0.width)×\($0.height)）" })
     private let frameRateControl = ChoiceMenu(items: ["自动", "30 FPS", "60 FPS"])
-    private let codecControl = ChoiceMenu(items: ["自动", "H.264", "H.265"])
     /// 0 = follow the head unit's screen, 1 = the fixed resolution.
     private let sizeModeControl = ChoiceMenu(items: ["跟随车机", "固定尺寸"])
     private let iconSizeControl = ChoiceMenu(items: ReceiverConfiguration.iconSizes.map { "\($0.title)（\($0.widthMM) mm）" })
     private let autoRestartSwitch = UISwitch()
-    private let performanceControl = ChoiceMenu(items: BrowserPerformance.allCases.map(\.title))
-    private let showTouchesSwitch = UISwitch()
     private let carButtonSwitch = UISwitch()
     private static let customVehicleIconKey = "customVehicleButtonPNG"
     private var customVehicleIcon: Data? { UserDefaults.standard.data(forKey: Self.customVehicleIconKey) }
@@ -109,39 +101,24 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var didRequestImmediatePiP = false
     /// What the running session was started with; compared against what the head unit reports.
     private var liveDisplay: DisplayPlan?
-    /// Screen reported by a browser in this run; it wins over the saved default.
-    private var reportedScreen: CarScreen?
-    private var primaryViewer: UUID?
-    private var screenAdaptation: DispatchWorkItem?
+    /// 记录的车机屏幕；「跟随车机」时按它定尺寸。
     /// Automatic restarts for lighter settings in this connection; at most two.
     private var autoRestarts = 0
-    /// 0 = normal, 1 = 30 FPS, 2 = also at most 720p. Raised by "自动重启" when a browser keeps hitching.
+    /// 0 = normal, 1 = 30 FPS, 2 = also at most 720p. Raised by "自动重启" when the picture keeps hitching.
     private var lightLevel = 0
-    /// 主观看端是老车机浏览器（Chromium < 60，如 Chrome 53 / Crosswalk）。
+    /// 旧版 Chromium 车机的降级参数，已随网页投屏移除不再使用。
     /// 这类机器的 MediaCodec 扛不住 1080P60 的 High@4.2：实测 MSE 播放停滞 + 解码失败 3；
-    /// 1080P60 的码率也不是 2.4G Wi-Fi 能稳的。识别到就按 720P/30 出画面。
-    private var legacyBrowserCap = false
     private var restartingAutomatically = false
     private var pendingRestartReason: String?
     private let appearanceControl = ChoiceMenu(items: ReceiverConfiguration.Appearance.allCases.map(\.title))
     /// CarPlay keys under the inline video.
     private let controlBar = UIStackView()
-    private let secureBrowserURLLabel = UILabel()
-    private let secureBrowserCopyButton = UIButton(type: .system)
-    private let secureBrowserRow = UIStackView()
-    private let secureBrowserDisclosure = UIButton(type: .system)
-    private let httpsExpandedKey = "browserHTTPSExpanded"
-    private var httpsExpanded: Bool { UserDefaults.standard.bool(forKey: httpsExpandedKey) }
-    private let browserCard = UIStackView()
     private let carLifeCard = UIStackView()
     private let airPlayCard = UIStackView()
     private let carLifeCardStatus = UILabel()
     private let airPlayCardStatus = UILabel()
     private let airPlayRoutePicker = AVRoutePickerView()
     private let airPlayRetryButton = UIButton(type: .system)
-    private let browserURLLabel = UILabel()
-    private let browserViewersLabel = UILabel()
-    private let browserCopyButton = UIButton(type: .system)
     private let bluetoothSetupSwitch = UISwitch()
     private var needsNetworkDetails: Bool { modeControl.selectedSegmentIndex != 0 || bluetoothSetupSwitch.isOn }
     private let startButton = UIButton(type: .system)
@@ -159,12 +136,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private lazy var pictureInPicture = CarPlayPictureInPicture(surface: videoSurface)
     private let keepAlive = BackgroundKeepAlive()
     private let keepAliveSwitch = UISwitch()
-    /// 三种输出：浏览器、CarLife、AirPlay。台铃 / 九号 / 极核 已整体移除。
+    /// 两种输出：CarLife 与 AirPlay。
     private let headUnitOutput = ChoiceMenu(items: ["CarLife", "AirPlay"])
     /// 车机网页投屏（浏览器输出）已整体移除：rawValue 0/1 分别对应 CarLife / AirPlay，
     /// 旧偏好里的 browser(原 0) 会落到 CarLife。
     private enum HeadUnitOutput: Int {
-        case carLife = 0, airPlay = 1, browser = 2
+        case carLife = 0, airPlay = 1
     }
     private var airPlayStreamID: UUID?
     private var airPlayStreamURL: URL?
@@ -268,7 +245,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         applyCarLifeFactoryPresetIfNeeded()
         title = "Carplay"
         // 声音输出不持久化：每次启动都从「随画面传输」开始。
-        selectedSoundOutput = .browser
+            selectedSoundOutput = .wifi
         // 「车机蓝牙」选项已删除：走不走蓝牙交给 iPhone 系统路由，不再强制 allowBluetoothA2DP。
         CarPlayAudio.preferBluetoothOutput = false
         navigationItem.largeTitleDisplayMode = .never
@@ -455,7 +432,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         receiver.onVideo = { [weak self] data, codec in
             guard let self, self.running else { return }
             // Nothing local is visible in the background without PiP: save the decoding work.
-            // The browser output is fed before this callback and keeps running.
+        // 画面先喂给 AirPlay 直播切片，再交给本机显示层。
             if UIApplication.shared.applicationState == .background, !self.pictureInPicture.canKeepSessionInBackground {
                 self.skippedLocalVideo = true; return
             }
@@ -482,7 +459,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         videoSurface.onKeyframeNeeded = { [weak self] reason in
             guard let self else { return }
             // In the background without PiP nothing is drawn locally; asking for keyframes then
-            // would only bloat the browser stream with repeated IDRs.
+        // 否则只会让直播切片里全是重复 IDR。
             guard UIApplication.shared.applicationState != .background || self.pictureInPicture.canKeepSessionInBackground else { return }
             self.receiver.requestKeyFrame(reason: reason)
         }
@@ -640,18 +617,13 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         defaults.set(resolutionControl.selectedSegmentIndex, forKey: "displayResolutionIndex")
         defaults.set(aspectRatioControl.selectedTitle, forKey: "displayAspectRatio")
         defaults.set([0, 30, 60][max(0, frameRateControl.selectedSegmentIndex)], forKey: "displayMaxFPS")
-        defaults.set(["auto", "h264", "h265"][max(0, codecControl.selectedSegmentIndex)], forKey: "videoCodec")
         defaults.set(sizeModeControl.selectedSegmentIndex, forKey: "displaySizeMode")
         defaults.set(ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM, forKey: "widthPhysicalMM")
-        defaults.set(selectedPerformance.rawValue, forKey: "browserPerformance")
         defaults.set(autoRestartSwitch.isOn, forKey: "autoRestart")
-        defaults.set(showTouchesSwitch.isOn, forKey: "showTouches")
         defaults.set(carButtonSwitch.isOn, forKey: "carButton")
     }
-    private var selectedPerformance: BrowserPerformance { BrowserPerformance.allCases[max(0, performanceControl.selectedSegmentIndex)] }
     private var followsCarScreen: Bool { sizeModeControl.selectedSegmentIndex == 0 }
-    /// The screen "跟随车机" sizes for: reported in this run, else the ticked or latest saved one.
-    private var targetScreen: CarScreen? { outputMode == .browser ? reportedScreen ?? CarScreenStore.preferred() : nil }
+    private var targetScreen: CarScreen? { CarScreenStore.preferred() }
 
     /// Size, frame rate and codec for the next session from the settings, the known head-unit
     /// screen and any lighter level chosen by "自动重启".
@@ -661,24 +633,19 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         var width = portrait ? cap.height : cap.width, height = portrait ? cap.width : cap.height
         var capArea = cap.width * cap.height
         if lightLevel >= 2 { capArea = min(capArea, 1280 * 720) }
-        // 老车机浏览器（Chromium < 60）默认就按 720P 出，不再等它卡了才自动降。
-        // 只对浏览器模式生效：CarLife 有车机自己的硬解，档位不该被浏览器这一侧牵连。
-        if legacyBrowserCap, outputMode == .browser { capArea = min(capArea, 1280 * 720) }
         // CarLife head units decode H.264 up to 1080p and usually ask for 30 FPS.
-        if outputMode != .browser { capArea = min(capArea, 1920 * 1080) }
+        capArea = min(capArea, 1920 * 1080)
         if followsCarScreen, let screen {
             width = screen.width; height = screen.height
         }
         // Scale down, keeping the aspect ratio, to the chosen maximum area and 3840 per side.
         var scale = min(1, (Double(capArea) / Double(width * height)).squareRoot(), 3840 / Double(max(width, height)))
-        if outputMode != .browser {
-            scale = min(scale, 1920 / Double(width), 1080 / Double(height))
-        }
+        scale = min(scale, 1920 / Double(width), 1080 / Double(height))
         width = max(320, Int(Double(width) * scale) / 2 * 2); height = max(320, Int(Double(height) * scale) / 2 * 2)
         if !followsCarScreen, let ratio = selectedAspectRatio {
             (width, height) = ReceiverConfiguration.fixedDisplaySize(area: capArea, ratio: ratio,
-                maxWidth: outputMode == .browser ? 3840 : 1920,
-                maxHeight: outputMode == .browser ? 3840 : 1080)
+                maxWidth: 1920,
+                maxHeight: 1080)
         }
         var fps: Int
         switch frameRateControl.selectedSegmentIndex {
@@ -686,16 +653,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         case 2: fps = 60
         default: fps = screen.map { (1..<45).contains($0.refreshHz) ? 30 : 60 } ?? 60
         }
-        if lightLevel >= 1 { fps = min(fps, 30) }
-        if legacyBrowserCap, outputMode == .browser { fps = min(fps, 30) }
-        if outputMode != .browser { fps = min(fps, 30) }
-        var codec: VideoCodec
-        switch codecControl.selectedSegmentIndex {
-        case 1: codec = .h264
-        case 2: codec = .h265
-        default: codec = screen?.supportsH265 == true ? .h265 : .h264
-        }
-        if outputMode != .browser { codec = .h264 }
+        fps = min(fps, 30)
+        let codec: VideoCodec = .h264
         let defaultIconWidth = ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM
         let iconWidth = followsCarScreen ? screen?.iconWidthMM ?? defaultIconWidth : defaultIconWidth
         return DisplayPlan(width: width, height: height, fps: fps, codec: codec, iconWidthMM: iconWidth)
@@ -770,28 +729,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         refreshVideoOutputSummary()
         (settingsNavigation?.topViewController as? SettingsPageController)?.refreshDetails()
     }
-    @objc private func saveBrowserPorts() {
-        guard !running, let browserPort else { return }
-        let defaults = UserDefaults.standard
-        if outputMode == .airPlay {
-            defaults.set(Int(browserPort), forKey: "videoOutputPort")
-            return
-        }
-        guard browserPortError == nil else { return }
-        defaults.set(Int(browserPort), forKey: "videoOutputPort")
-        if secureVideoOutputPortField.text?.isEmpty == false, let secureBrowserPort {
-            defaults.set(Int(secureBrowserPort), forKey: "secureVideoOutputPort")
-        } else {
-            defaults.removeObject(forKey: "secureVideoOutputPort")
-        }
+    @objc private func saveOutputPort() {
+        guard !running, let outputPort else { return }
+        UserDefaults.standard.set(Int(outputPort), forKey: "videoOutputPort")
     }
-    @objc private func videoOutputToggled() {
-        guard !running else { return }
-        UserDefaults.standard.set(videoOutputSwitch.isOn, forKey: "videoOutputEnabled")
-        refreshVideoOutputSummary()
-        reloadVisibleSettings()
-    }
-    private var browserAddress: String? {
+    private var lanAddress: String? {
         ReceiverConfiguration.lanIPv4Address()
             ?? (UIDevice.current.userInterfaceIdiom == .phone ? nil : ReceiverConfiguration.localIPv4Addresses().first)
     }
@@ -799,28 +741,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         guard let text, let port = UInt16(text), port > 0 else { return nil }
         return port
     }
-    private var browserPort: UInt16? { portNumber(videoOutputPortField.text) }
-    private var defaultSecurePort: UInt16 {
-        guard let browserPort, browserPort < UInt16.max else { return 9889 }
-        return browserPort + 1
-    }
-    private var secureBrowserPort: UInt16? {
-        if secureVideoOutputPortField.text?.isEmpty != false { return defaultSecurePort }
-        return portNumber(secureVideoOutputPortField.text)
-    }
-    private var browserPortError: String? {
-        guard let browserPort else { return "HTTP 端口请输入 1–65535。" }
-        guard let secureBrowserPort else { return "HTTPS 端口请输入 1–65535，或留空使用默认值。" }
-        guard browserPort != secureBrowserPort else { return "HTTP 和 HTTPS 端口不能相同。" }
-        return nil
-    }
-    private var browserURL: String? {
-        guard let address = browserAddress, let browserPort else { return nil }
-        return "http://\(address):\(browserPort)"
-    }
-    private var localBrowserURL: URL? {
-        browserPort.flatMap { URL(string: "http://127.0.0.1:\($0)/") }
-    }
+    private var outputPort: UInt16? { portNumber(videoOutputPortField.text) }
     private func configureOutputCard(_ card: UIStackView) {
         card.axis = .vertical
         card.spacing = 10
@@ -858,46 +779,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         card.addArrangedSubview(status)
     }
 
-    private func refreshBrowserAddressLabels() {
-        let missing = ReceiverConfiguration.personalHotspotActive ? "未连接 Wi-Fi" : "未连接 Wi-Fi（也未开启个人热点）"
-        browserURLLabel.text = browserURL ?? (browserPort == nil ? "HTTP 端口无效" : missing)
-        browserCopyButton.isEnabled = browserURL != nil
-        refreshNetworkSummary()
-    }
-
     private func refreshVideoOutputSummary() {
-        videoOutputSwitch.isEnabled = !running && outputMode == .browser
-        videoOutputPortField.isEnabled = !running && outputMode == .browser && videoOutputSwitch.isOn
-        if outputMode == .airPlay {
-            videoOutputPortField.isEnabled = !running
-            if !running {
-                updateAirPlayStatus(browserPort == nil ? "播放端口请输入 1–65535。" : "等待启动 CarPlay。")
-            }
+        videoOutputPortField.isEnabled = !running
+        if outputMode == .airPlay, !running {
+            updateAirPlayStatus(outputPort == nil ? "播放端口请输入 1–65535。" : "等待启动 CarPlay。")
         }
-        portStatus.text = browserPortError ?? (running ? "停止 CarPlay 后可修改端口。" : "启动 CarPlay 后即可打开上方地址。")
+        portStatus.text = outputPort == nil ? "播放端口请输入 1–65535。"
+            : (running ? "停止 CarPlay 后可修改端口。" : "启动 CarPlay 后即可使用 AirPlay。")
         let showsLocalOutput = modeControl.selectedSegmentIndex != 2
         carLifeCard.isHidden = !showsLocalOutput || outputMode != .carLife
         airPlayCard.isHidden = !showsLocalOutput || outputMode != .airPlay
-        browserCard.isHidden = outputMode != .browser || !videoOutputSwitch.isOn
-        guard outputMode == .browser, videoOutputSwitch.isOn else { return }
-        refreshBrowserAddressLabels()
-        secureBrowserDisclosure.configuration?.image = UIImage(systemName: httpsExpanded ? "chevron.up" : "chevron.down")
-        secureBrowserDisclosure.accessibilityValue = httpsExpanded ? "已展开" : "已折叠"
-        secureBrowserRow.isHidden = !httpsExpanded
-        if !running {
-            browserViewersLabel.text = "启动后最多 \(VideoOutputServer.maximumViewers) 台同时观看。"
-        }
-    }
-    @objc private func toggleHTTPSAddress() {
-        UserDefaults.standard.set(!httpsExpanded, forKey: httpsExpandedKey)
-        refreshVideoOutputSummary()
-    }
-    @objc private func copyVideoURL() { copy(browserURL, button: browserCopyButton) }
-    private func copy(_ url: String?, button: UIButton) {
-        guard let url else { return }
-        UIPasteboard.general.string = url
-        button.setTitle("已复制", for: .normal)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { button.setTitle("复制", for: .normal) }
     }
     @objc private func startPictureInPicture() {
         if !pictureInPicture.start() { statusLabel.text = "暂时无法开启画中画" }
@@ -913,23 +804,19 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         config.width = plan.width; config.height = plan.height
         config.maxFPS = plan.fps; config.videoCodec = plan.codec
         config.widthPhysicalMM = plan.iconWidthMM
-        config.showTouches = showTouchesSwitch.isOn
         if carButtonSwitch.isOn {
             config.oemIconPNG = customVehicleIcon ?? Self.carButtonIcon
             config.oemIconLabel = String((nameField.text ?? "").prefix(12)).isEmpty ? "Carplay" : String((nameField.text ?? "").prefix(12))
         }
-        let source = outputMode != .browser ? headUnitOutput.selectedTitle
-            : followsCarScreen ? (screen.map { "车机屏幕 \($0.title)" } ?? "尚无车机屏幕，用固定分辨率") : "固定尺寸"
+        let source = headUnitOutput.selectedTitle
         log("画面计划：\(plan.width)×\(plan.height) @ \(plan.fps) FPS \(plan.codec.displayName)（\(source)\(lightLevel > 0 ? "，减轻档 \(lightLevel)" : "")）")
-        // 车机页面上的"在车机播放声音"要求音频帧一直送到页面：页面只有在用户点开菜单项
-        // （或点"开启声音"）时才真正播放，所以这里始终把音频送往浏览器，声音开关交给页面。
         if outputMode == .airPlay, config.videoOutputPort != nil { config.airPlayStreamID = UUID() }
         config.carLifeEnabled = outputMode == .carLife
         // 「随画面传输」在两种模式下落到不同通道：
         // · CarLife 模式 → CarLife 伴音通道（车机靠它出声）；
-        // · 车机浏览器模式 → 网页播放。
+        // · AirPlay 投送 → 声音留在 iPhone 本身或车机蓝牙。
         // 两种模式互斥，不会同时启用。
-        // 声音固定「随画面传输」：CarLife 模式走伴音通道，浏览器模式走网页；不再有本机输出。
+        // 声音固定「随画面传输」：CarLife 模式走伴音通道；不再有本机输出。
         config.carLifeAudio = config.carLifeEnabled
         config.audioLocal = false
         log("声音输出：随画面传输（Wi‑Fi），CarLife 模式=\(config.carLifeEnabled ? "开" : "关")")
@@ -1163,9 +1050,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         saveDisplaySettings()
         UserDefaults.standard.set(pictureInPictureTiming.selectedSegmentIndex != 0, forKey: "pictureInPictureEnabled")
         UserDefaults.standard.set(pictureInPictureTiming.selectedSegmentIndex, forKey: "pictureInPictureTiming")
-        UserDefaults.standard.set(videoOutputSwitch.isOn, forKey: "videoOutputEnabled")
         saveHeadUnitOutput()
-        if config.videoOutputPort != nil { saveBrowserPorts() }
+        if config.videoOutputPort != nil { saveOutputPort() }
         if modeControl.selectedSegmentIndex != 2 { UserDefaults.standard.set(config.name, forKey: "receiverName") }
         return true
     }
@@ -1277,7 +1163,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: declaresAudio,
                 videoOutputPort: outputPort,
                 deviceID: ReceiverConfiguration.persistentDeviceID())
-            if !restartingAutomatically { autoRestarts = 0; lightLevel = 0; reportedScreen = nil; primaryViewer = nil }
+            if !restartingAutomatically { autoRestarts = 0; lightLevel = 0 }
             configureDisplay(&config)
             do { try config.validate() } catch {
                 revealSettings(); statusLabel.text = error.localizedDescription; return
@@ -1305,16 +1191,16 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
                 self.sameDevice.start(configuration: live, identity: identity)
             }
             prepareExternalOutput(configuration: config)
-            receiver.start(configuration: config, identity: identity, preferredViewer: primaryViewer)
+            receiver.start(configuration: config, identity: identity, preferredViewer: nil)
             watchStartupAddress(address)
             return
         }
         guard let identity else { return }
         if let hotspot = ReceiverConfiguration.hotspotIPv4Address() {
-            log("已检测到个人热点 \(hotspot)：车机加入这个热点后，用 http://\(hotspot):\(browserPort ?? 9888) 访问；CarPlay 会话也走这个热点地址建连")
+            log("已检测到个人热点 \(hotspot)：车机加入这个热点后，CarLife 会改用这个热点地址建连")
         }
         let addresses = ReceiverConfiguration.localIPv4Addresses()
-        if !addresses.contains(ipField.text ?? "") { ipField.text = browserAddress ?? addresses.first }
+        if !addresses.contains(ipField.text ?? "") { ipField.text = lanAddress ?? addresses.first }
         var config = ReceiverConfiguration(name: nameField.text ?? "Carplay", address: ipField.text ?? "",
             ssid: ssidField.text ?? "", password: password, wifiChannel: channel, audioEnabled: declaresAudio,
             videoOutputPort: outputPort,
@@ -1344,11 +1230,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     }
 
     private var localCarPlayAddress: String? {
-        browserAddress
+        lanAddress
     }
 
     private func refreshNetworkAddresses() {
-        refreshBrowserAddressLabels()
+        refreshNetworkSummary()
     }
 
     private func waitForLocalNetwork() {
@@ -1424,8 +1310,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         updateCarLifeStatus("等待启动 CarPlay。")
         running = false
         sessionHasVehicleButton = false
-        screenAdaptation?.cancel(); screenAdaptation = nil
-        reportedScreen = nil; primaryViewer = nil; pendingRestartReason = nil
+        pendingRestartReason = nil
         pictureInPicture.stop(); keepAlive.stop(); skippedLocalVideo = false
         hideFullscreen(); videoActions.isHidden = true; controlBar.isHidden = true
         displayedVideo = false; didRequestImmediatePiP = false
@@ -1497,14 +1382,12 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private func setEditing(_ value: Bool) {
         [nameField, ipField, ssidField, passwordField, channelField, videoOutputPortField].forEach { $0.isEnabled = value }
         openNetworkSwitch.isEnabled = value
-        videoOutputSwitch.isEnabled = value && outputMode == .browser
         orientationControl.isEnabled = value
         resolutionControl.isEnabled = value
         aspectRatioControl.isEnabled = value
         frameRateControl.isEnabled = value
-        codecControl.isEnabled = value
-        [sizeModeControl, iconSizeControl, performanceControl].forEach { $0.isEnabled = value }
-        [autoRestartSwitch, showTouchesSwitch, carButtonSwitch].forEach { $0.isEnabled = value }
+        [sizeModeControl, iconSizeControl].forEach { $0.isEnabled = value }
+        [autoRestartSwitch, carButtonSwitch].forEach { $0.isEnabled = value }
         driveControl.isEnabled = value
         bluetoothSetupSwitch.isEnabled = value
         transportProbeButton.isEnabled = value
@@ -1560,12 +1443,11 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
             autoRestarts += 1
         }
         log("自动重启 CarPlay：\(reason)")
-        let keepScreen = reportedScreen, keepViewer = primaryViewer, level = lightLevel, count = autoRestarts
+        let level = lightLevel, count = autoRestarts
         stop()
         statusLabel.text = "正在按新的画面设置重启 CarPlay…"
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self, !self.running else { return }
-            self.reportedScreen = keepScreen; self.primaryViewer = keepViewer
             self.lightLevel = level; self.autoRestarts = count
             self.restartingAutomatically = true
             self.toggleReceiver()
@@ -1662,7 +1544,7 @@ extension ReceiverViewController {
 
         // 3) 声音默认「随画面传输」：CarLife 模式下走伴音通道（通道 3）由车机出声；
         //    车机没音响时，再在声音页切回「由 iPhone 输出」。
-        defaults.set(SoundOutput.browser.rawValue, forKey: "soundOutput")
+        defaults.set(SoundOutput.wifi.rawValue, forKey: "soundOutput")
 
         // 4) 分辨率默认 1080P（resolutions 索引 2）
         defaults.set(2, forKey: "displayResolutionIndex")
@@ -1692,16 +1574,12 @@ extension ReceiverViewController {
         }.map { $0 + 1 } ?? 0
         sizeModeControl.selectedSegmentIndex = defaults.object(forKey: "displaySizeMode") as? Int ?? 0
         frameRateControl.selectedSegmentIndex = [0: 0, 30: 1, 60: 2][defaults.object(forKey: "displayMaxFPS") as? Int ?? 60] ?? 2
-        codecControl.selectedSegmentIndex = ["auto": 0, "h264": 1, "h265": 2][defaults.string(forKey: "videoCodec") ?? "h264"] ?? 1
         let savedWidth = defaults.object(forKey: "widthPhysicalMM") as? Int ?? CarPlayInfo.defaultWidthPhysicalMM
         iconSizeControl.selectedSegmentIndex = ReceiverConfiguration.iconSizes.firstIndex { $0.widthMM == savedWidth } ?? 1
-        performanceControl.selectedSegmentIndex = BrowserPerformance.allCases.firstIndex(of:
-            BrowserPerformance(rawValue: defaults.string(forKey: "browserPerformance") ?? "") ?? .auto) ?? 0
         autoRestartSwitch.isOn = defaults.object(forKey: "autoRestart") as? Bool ?? false
-        showTouchesSwitch.isOn = defaults.bool(forKey: "showTouches")
         carButtonSwitch.isOn = defaults.object(forKey: "carButton") as? Bool ?? true
-        let displayControls: [UIControl] = [resolutionControl, aspectRatioControl, sizeModeControl, frameRateControl, codecControl, iconSizeControl,
-                                            performanceControl, autoRestartSwitch, showTouchesSwitch, carButtonSwitch]
+        let displayControls: [UIControl] = [resolutionControl, aspectRatioControl, sizeModeControl, frameRateControl, iconSizeControl,
+                                            autoRestartSwitch, carButtonSwitch]
         displayControls.forEach { $0.addTarget(self, action: #selector(displaySettingChanged), for: .valueChanged) }
         appearanceControl.selectedSegmentIndex = defaults.integer(forKey: "carPlayAppearance")
         appearanceControl.addTarget(self, action: #selector(appearanceChanged), for: .valueChanged)
@@ -1730,8 +1608,6 @@ extension ReceiverViewController {
         carLifeAddressField.addTarget(self, action: #selector(saveHeadUnitOutput), for: .editingDidEnd)
         updateCarLifeStatus("等待启动 CarPlay。")
         updateAirPlayStatus("等待启动 CarPlay。")
-        videoOutputSwitch.isOn = defaults.object(forKey: "videoOutputEnabled") as? Bool ?? true
-        videoOutputSwitch.addTarget(self, action: #selector(videoOutputToggled), for: .valueChanged)
         carLifeAudioSwitch.isOn = defaults.object(forKey: "carLifeAudio") as? Bool ?? true
         carLifeAudioSwitch.addTarget(self, action: #selector(carLifeAudioToggled), for: .valueChanged)
         navDuckingSwitch.isOn = defaults.object(forKey: "navDuckingMusic") as? Bool ?? true
@@ -1741,12 +1617,11 @@ extension ReceiverViewController {
         CarLifeOutput.navigationDuckingEnabled = navDuckingSwitch.isOn
         CarPlayAudio.duckMusicForNavigation = navDuckingSwitch.isOn
         videoOutputPortField.text = String(defaults.object(forKey: "videoOutputPort") as? Int ?? 9888)
-        secureVideoOutputPortField.text = (defaults.object(forKey: "secureVideoOutputPort") as? Int).map { String($0) }
-        for (field, label) in [(videoOutputPortField, "HTTP 端口"), (secureVideoOutputPortField, "HTTPS 端口")] {
+        for (field, label) in [(videoOutputPortField, "播放端口")] {
             field.keyboardType = .numberPad
             field.accessibilityLabel = label
             field.addTarget(self, action: #selector(videoOutputSettingChanged), for: .editingChanged)
-            field.addTarget(self, action: #selector(saveBrowserPorts), for: .editingDidEnd)
+            field.addTarget(self, action: #selector(saveOutputPort), for: .editingDidEnd)
             let toolbar = UIToolbar()
             toolbar.items = [.flexibleSpace(), UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak field] _ in
                 field?.resignFirstResponder()
@@ -1866,7 +1741,7 @@ extension ReceiverViewController {
             [
                 SettingsSection("1. 先连网络", [
                     .guide("让 iPhone 加入 Wi-Fi，或直接开个人热点", icon: ("wifi", .systemBlue),
-                           "路由器、车机 Wi-Fi 或另一台手机的热点都可以，也可以干脆用这台 iPhone 自己开个人热点：车机连上这个热点后，用首页显示的 172.20.10.x 地址访问即可。"),
+                           "路由器、车机 Wi-Fi 或另一台手机的热点都可以，也可以干脆用这台 iPhone 自己开个人热点：车机连上这个热点后，CarLife 会自动发现这台 iPhone。"),
                     .guide("选择同名预设", icon: ("list.bullet", .systemBlue),
                            "回到 Carplay，在「Wi-Fi 预设」选择刚连的网络。第一次用，在「Wi-Fi 与网络」添加。热点模式下没有可加入的网络名，留空也能启动。")
                 ]),
@@ -1884,16 +1759,6 @@ extension ReceiverViewController {
                     .guide("仪表没有画面", icon: ("display", .systemPurple),
                            "确认选对仪表型号、仪表已打开投屏，并在「输出设置」核对仪表 IP。先结束其他投屏。")
                 ])
-            ]
-        }
-    }
-
-    private func httpsHelpPage() -> SettingsPageController {
-        page("HTTPS 低延迟") {
-            [
-                SettingsSection("从 HTTP 接收页开始", footer: "在接收设备上打开 HTTP 接收页，点「配置 HTTPS」，再按页面步骤为该设备安装证书。", []),
-                SettingsSection("iPhone 和 iPad", footer: "下载描述文件后，在系统设置安装，再前往「通用 › 关于本机 › 证书信任设置」开启完全信任，最后打开 HTTPS 地址。", []),
-                SettingsSection("Android", footer: "下载 Android 证书，按接收页指引在系统设置中安装为 CA 证书，再打开 HTTPS 地址。系统菜单名称随品牌而异。", [])
             ]
         }
     }
@@ -1997,9 +1862,6 @@ extension ReceiverViewController {
             connection.append(.page("Wi-Fi 预设", icon: ("list.bullet", .systemBlue), detail: { WiFiPresetStore.selected()?.ssid ?? "未选择" }) { [unowned self] in self.presetsPage() })
             connection.append(.control("当前输出", icon: ("point.3.connected.trianglepath.dotted", .systemIndigo), headUnitOutput))
             connection.append(.page("输出设置", icon: ("slider.horizontal.3", .systemGray)) { [unowned self] in self.headUnitPage() })
-            if outputMode == .browser {
-         
-            }
             return [
                 SettingsSection("连接与输出", connection),
                 SettingsSection("CarPlay", [
@@ -2045,15 +1907,14 @@ extension ReceiverViewController {
             let plan = planDisplay(for: targetScreen)
             return [
                 SettingsSection(footer: (followsCarScreen
-                    ? "启动时先用勾选的屏幕或最近一次设置。第一个网页接管后，窗口尺寸变化会在 Carplay 回到前台时应用。更大的窗口按最高分辨率等比缩小。"
+                    ? "启动时先用勾选的屏幕或最近一次设置。用 CarLife 连上车机后，屏幕变化会在 Carplay 回到前台时重新应用。更大的窗口按最高分辨率等比缩小。"
                     : "选择比例后按分辨率档位计算尺寸，短边至少 320 像素，实际值见下方。2K/4K 会增加发热和带宽。")
-                    + (!followsCarScreen && outputMode != .browser ? "\n此输出受 1920×1080 限制，较长的竖屏比例以实际尺寸为准。" : "")
+                    + (!followsCarScreen ? "\n此输出受 1920×1080 限制，较长的竖屏比例以实际尺寸为准。" : "")
                     + "\n下次启动：\(plan.width)×\(plan.height) · \(plan.fps) FPS · \(plan.codec.displayName)", size),
-                SettingsSection(footer: "自动帧率根据主网页选择 30 或 60 FPS。支持 H.265 的主网页会优先使用 H.265。", [
-                    .control("视频编码", icon: ("film.fill", .systemGreen), codecControl),
+                SettingsSection(footer: "自动帧率按记录的车机屏幕选择 30 或 60 FPS。", [
                     .control("帧率", icon: ("gauge.with.dots.needle.67percent", .systemGreen), frameRateControl)
                 ]),
-                SettingsSection(footer: "浏览器画面持续卡顿时，自动以更轻的画面重启 CarPlay（先降到 30 FPS，再降到 720P），每次连接最多两次。", [
+                SettingsSection(footer: "画面持续卡顿时，自动以更轻的画面重启 CarPlay（先降到 30 FPS，再降到 720P），每次连接最多两次。", [
                     .control("自动重启", icon: ("arrow.clockwise", .systemGreen), autoRestartSwitch)
                 ]),
                 SettingsSection("图标", footer: "图标越小，一页放下的越多。可以在「车机屏幕」为不同屏幕保存图标大小。", [
@@ -2069,7 +1930,7 @@ extension ReceiverViewController {
         page("车机屏幕") { [unowned self] in
             let screens = CarScreenStore.screens()
             guard !screens.isEmpty else {
-                return [SettingsSection(footer: "启动 CarPlay 后，在车机浏览器打开接收页，屏幕会自动记录在这里。", [])]
+                return [SettingsSection(footer: "还没有记录车机屏幕。用 CarLife 连上车机后会自动记录在这里。", [])]
             }
             var rows: [SettingsRow] = screens.map { screen in
                 var row = SettingsRow.action(screen.title) { CarScreenStore.setDefault(screen.key) }
@@ -2077,7 +1938,6 @@ extension ReceiverViewController {
                 row.checked = { CarScreenStore.defaultKeyValue == screen.key }
                 row.onDelete = { [unowned self] in
                     CarScreenStore.remove(screen.key)
-                    if self.reportedScreen?.key == screen.key { self.reportedScreen = nil }
                 }
                 return row
             }
@@ -2117,13 +1977,13 @@ extension ReceiverViewController {
     fileprivate func soundPage() -> SettingsPageController {
         page("声音") { [unowned self] in
             // 声音只有一种输出：随画面传输（Wi‑Fi）。
-            // CarLife 模式走伴音通道由车机播放；浏览器模式由浏览器播放。未连接时静默，不回落 iPhone。
+        // CarLife 模式走伴音通道由车机播放；未连接时静默。
             var duckRow = SettingsRow.control("导航播报时音乐压低 75%（约 −12 dB）", icon: ("speaker.wave.1.fill", .systemOrange), navDuckingSwitch)
             duckRow.subtitle = { "导航播报期间把音乐压到 1/4，播报结束（含 3 秒尾巴）自动恢复；关闭则音量不变。" }
             var callRow = SettingsRow.control("声明 CarPlay 通话能力（电话进车机）", icon: ("phone.fill", .systemRed), telephonySwitch)
             callRow.subtitle = { "默认关闭：/info 里不写 telephony、也不发电话键，iPhone 只把音乐/导航送到车机，电话与微信通话留在手机本身或车机蓝牙，画面不受影响。打开后恢复历史那套完整声明（音乐同样有声），但通话会被拉进 CarPlay，而本机不供麦，通话双方听不到。" }
             let sections = [
-                SettingsSection(footer: "声音随画面走 Wi‑Fi：CarLife 模式由车机播放，浏览器模式由浏览器播放；未连接时保持静默，不回落 iPhone。", [
+                SettingsSection(footer: "声音随画面走 Wi‑Fi：由车机 CarLife 端播放；未连接时保持静默，不回落 iPhone。", [
                     .info("随画面传输（Wi‑Fi）", "解码后的 PCM 随画面送到接收端，连接建立后自动出声，断开时自动暂停音乐。")
                 ]),
                 SettingsSection(footer: "只压低送到车机通道 3 的音乐 PCM 本身，不依赖车机支持 setVolume；导航播报走车机通道 4。", [duckRow]),
@@ -2311,7 +2171,6 @@ extension ReceiverViewController {
     fileprivate func headUnitPage() -> SettingsPageController {
         page("输出设置") { [unowned self] in
             switch outputMode {
-            case .browser: return []
             case .carLife: return carLifeOutputSections()
             case .airPlay: return airPlayOutputSections()
             }
@@ -2402,30 +2261,6 @@ extension ReceiverViewController {
         ]
     }
 
-    private func browserOutputSections() -> [SettingsSection] {
-        let browser = SettingsSection(footer: videoOutputSwitch.isOn ? nil : "开启后，同一局域网的浏览器可以查看并触控 CarPlay。", [
-            .control("局域网接收页", icon: ("globe", .systemTeal), videoOutputSwitch)
-        ])
-        guard videoOutputSwitch.isOn else { return [browser] }
-        return [
-            browser,
-            SettingsSection("HTTP · 兼容模式", [
-                .field("HTTP 端口", videoOutputPortField),
-                .action("在本机浏览器打开") { [unowned self] in
-                    guard self.running, let url = self.localBrowserURL else {
-                        self.alert("请先启动 CarPlay", "启动后就可以在本机浏览器查看画面。")
-                        return
-                    }
-                    UIApplication.shared.open(url)
-                }
-            ]),
-            SettingsSection("高级", footer: "浏览器性能默认自动。低延迟频繁跳帧时会回到兼容模式。", [
-                .control("浏览器性能", icon: ("speedometer", .systemBlue), performanceControl),
-                .control("显示触摸点", icon: ("hand.tap.fill", .systemOrange), showTouchesSwitch)
-            ])
-        ]
-    }
-
     // MARK: 日志 / 实验 / 关于
 
     fileprivate func logPage() -> SettingsPageController {
@@ -2471,7 +2306,6 @@ extension ReceiverViewController {
         }
         return SettingsSection("诊断信息", [
             .page("日志", icon: ("doc.text.fill", .systemGray)) { [unowned self] in self.logPage() },
-            .info("界面版本", "CarLife 车载伴侣"),
             .info("设备", "\(model) · iOS \(UIDevice.current.systemVersion)"),
             .info("MFi 身份", identity != nil ? "已载入" : "未载入")
         ])
@@ -2524,7 +2358,7 @@ extension ReceiverViewController {
         version.textColor = .secondaryLabel
         version.adjustsFontForContentSizeCategory = true
         let introduction = UILabel()
-        introduction.text = "在这台 iPhone 上启动 CarPlay，把画面和声音送到车机：浏览器、CarLife 或 AirPlay。"
+        introduction.text = "在这台 iPhone 上启动 CarPlay，把画面和声音送到车机：CarLife 或 AirPlay。"
         introduction.font = .preferredFont(forTextStyle: .subheadline)
         introduction.textColor = .secondaryLabel
         introduction.adjustsFontForContentSizeCategory = true
@@ -2542,34 +2376,6 @@ extension ReceiverViewController {
         return card
     }
 
-}
-
-extension ReceiverViewController: UIDocumentPickerDelegate {
-    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let url = urls.first, !running else { return }
-        let access = url.startAccessingSecurityScopedResource()
-        defer { if access { url.stopAccessingSecurityScopedResource() } }
-        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 512 * 1024,
-              let data = try? Data(contentsOf: url) else { alert("无法导入", "请选择不超过 512 KB 的 P12 证书。"); return }
-        let prompt = UIAlertController(title: "证书密码", message: "密码与证书仅保存在本机 Keychain。", preferredStyle: .alert)
-        prompt.addTextField { $0.isSecureTextEntry = true; $0.placeholder = "P12 密码，可为空" }
-        prompt.addAction(UIAlertAction(title: "取消", style: .cancel))
-        prompt.addAction(UIAlertAction(title: "导入", style: .default) { [weak self, weak prompt] _ in
-            do {
-                self?.httpsStatus.text = "证书通过本机域名、有效期和信任校验，重新启动 CarPlay 后生效。"
-                self?.reloadVisibleSettings()
-            } catch { self?.httpsStatus.text = error.localizedDescription }
-        })
-        let presentPrompt = { [weak self] in
-            guard let self else { return }
-            (self.settingsNavigation ?? self).present(prompt, animated: true)
-        }
-        if controller.presentingViewController != nil {
-            controller.dismiss(animated: true, completion: presentPrompt)
-        } else {
-            DispatchQueue.main.async(execute: presentPrompt)
-        }
-    }
 }
 
 extension ReceiverViewController: UIAdaptivePresentationControllerDelegate {
