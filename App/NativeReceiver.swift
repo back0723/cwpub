@@ -106,6 +106,8 @@ final class NativeReceiver {
     var onVideo: ((Data, VideoCodec) -> Void)?
     var onAirPlayReady: ((UUID) -> Void)?
     var onVideoOutputState: ((String) -> Void)?
+    /// 观看端浏览器标识（判断老车机浏览器，决定画面档位）。
+    var onBrowserUserAgent: ((String) -> Void)?
     var onFailure: (() -> Void)?
 
     /// 浏览器接收页在会话启动前就常驻（CarMode 的做法，端口 8787 那一版的等效实现）。
@@ -141,6 +143,9 @@ final class NativeReceiver {
             DispatchQueue.main.async { [weak self] in self?.onAirPlayReady?(id) }
         }
         videoOutput.onState = { [weak self] in self?.onVideoOutputState?($0) }
+        videoOutput.onViewerUserAgent = { [weak self] ua in
+            DispatchQueue.main.async { self?.onBrowserUserAgent?(ua) }
+        }
         videoOutput.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
         videoOutput.onTouches = { [weak self] source, points in self?.touches(source: source, points) }
         videoOutput.onControl = { [weak self] in self?.press($0) }
