@@ -53,7 +53,11 @@ final class CarPlayMediaSession {
     private var video: MediaTCPConnection?
     private var timing: MediaTiming?
     private var audio: [Int: CarPlayAudio] = [:]
-    private let audioEnabled: Bool
+    /// 车机麦 PCM（CarLife 通道 5 / id 0x58001）→ 当前通话流的上行编码链路。
+    /// 只有 voice 流对应的 CarPlayAudio 会持有 NativeMicrophone，音乐流拿到会自己忽略。
+    func feedVehicleMicrophone(_ pcm: Data) {
+        for output in audio.values { output.feedVehicleMicrophone(pcm) }
+    }    private let audioEnabled: Bool
     private let hevc: Bool
     private var eventCipher: ControlCipher?
     private var eventParser = RTSPParser(allowResponses: true)
