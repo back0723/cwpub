@@ -743,7 +743,8 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         var capArea = cap.width * cap.height
         if lightLevel >= 2 { capArea = min(capArea, 1280 * 720) }
         // 老车机浏览器（Chromium < 60）默认就按 720P 出，不再等它卡了才自动降。
-        if legacyBrowserCap { capArea = min(capArea, 1280 * 720) }
+        // 只对浏览器模式生效：CarLife 有车机自己的硬解，档位不该被浏览器这一侧牵连。
+        if legacyBrowserCap, outputMode == .browser { capArea = min(capArea, 1280 * 720) }
         // CarLife head units decode H.264 up to 1080p and usually ask for 30 FPS.
         if outputMode != .browser { capArea = min(capArea, 1920 * 1080) }
         if followsCarScreen, let screen {
@@ -767,7 +768,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         default: fps = screen.map { (1..<45).contains($0.refreshHz) ? 30 : 60 } ?? 60
         }
         if lightLevel >= 1 { fps = min(fps, 30) }
-        if legacyBrowserCap { fps = min(fps, 30) }
+        if legacyBrowserCap, outputMode == .browser { fps = min(fps, 30) }
         if outputMode != .browser { fps = min(fps, 30) }
         var codec: VideoCodec
         switch codecControl.selectedSegmentIndex {
