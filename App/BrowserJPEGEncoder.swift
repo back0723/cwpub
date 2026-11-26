@@ -85,7 +85,10 @@ final class BrowserJPEGEncoder {
             self.parameters = newParameters
             // 每次 CarPlay 会话重启都会把服务端的参数集清空重来，而这里保存的可能是上一场的，
             // 参数没变但解码器已经不在了（-12903 之后被扔掉）也必须重建，否则画面永远不出来。
-            if unchanged, self.session != nil, !self.softwareDecode { return }
+            // 注意：判据只看「解码器还在不在」，不能带上 softwareDecode——那一版写成了
+            // `!softwareDecode`，结果退到软件解码之后每一帧都重建一次 VT 会话，兼容画面再也
+            // 不出图，日志里只剩每 2 秒一条「JPEG 解码失败（-8969）」。
+            if unchanged, self.session != nil { return }
             self.rebuildSessionLocked(newParameters, software: self.softwareDecode)
         }
     }
@@ -195,6 +198,9 @@ final class BrowserJPEGEncoder {
             self.droppedWhileUnready = 0
             self.decodeFailures = 0
             self.loggedFirstJPEG = false
+            // 新的一场 CarPlay 会话重新给硬解一次机会：上一场 -12903 是“通道被本机预览占着”，
+            // 应用回到前台、预览换过会话之后这个结论不一定还成立，退成软件就再也升不回来了。
+            self.softwareDecode = false
         }
     }
 
@@ -258,7 +264,12 @@ final class BrowserJPEGEncoder {
         }
 
         let attributes: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            // 软件解码器不会替我们把 4:2:0 转成 BGRA（那样会以 -8969 kVTVideoDecoderBadDataErr
+            // 一帧一帧地报错，实测就是把画面卡死的那个循环），所以软件解码直接要 YUV，
+            // 交给 CIImage 转换；硬解仍然要 BGRA，省掉一次转换。
+            kCVPixelBufferPixelFormatTypeKey: software
+                ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                : kCVPixelFormatType_32BGRA,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
         ]
         var record = VTDecompressionOutputCallbackRecord(
