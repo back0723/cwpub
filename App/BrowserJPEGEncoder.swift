@@ -37,7 +37,7 @@ final class BrowserJPEGEncoder {
     private let maximumFPS: Int
     /// Downscale anything wider than this before encoding. Old head units decode a 1436×640
     /// JPEG per frame slowly; 1280 keeps the picture usable with a much cheaper decode.
-    private let maximumWidth: CGFloat
+    private var maximumWidth: CGFloat
     private var lastEmitUs: UInt64 = 0
     /// Frames dropped because no decoder existed yet; logged throttled to keep the log readable.
     private var droppedWhileUnready = 0
@@ -166,6 +166,17 @@ final class BrowserJPEGEncoder {
         case .h265:
             guard let vps = units[32], let sps = units[33], let pps = units[34] else { return nil }
             return VideoParameterSets(codec: .h265, vps: vps, sps: sps, pps: pps)
+        }
+    }
+
+    /// 车机自己上报的帧率决定兼容画面有多宽：软解跟不上就降到下一档，只改编码宽度，
+    /// 高度按画面计划的比例跟着走，不会被拉变形。实测那台 CM8049（Android 4.2）扛不住时值这个。
+    func setMaximumWidth(_ width: CGFloat) {
+        queue.async {
+            let clamped = min(max(width, 640), 1920)
+            guard clamped != self.maximumWidth else { return }
+            self.maximumWidth = clamped
+            self.onLog?("JPEG 兼容画面宽度改为 \(Int(clamped))")
         }
     }
 
