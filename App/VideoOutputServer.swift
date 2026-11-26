@@ -173,7 +173,7 @@ final class VideoOutputServer {
                         // CarMode 页面的兼容画面就是 tag 3 + 一整张 JPEG，页面按图片自然尺寸画。
                         // 页面只有 phase=ready 才会把图画出来，所以第一张图前面补一个 ready。
                         if !client.carModeStateReadySent {
-                            client.carModeStateReadySent = true
+                            self.clients[client.id]?.carModeStateReadySent = true
                             self.sendCarModeState("ready", message: "正在显示 CarPlay", to: client)
                         }
                         var packet = Data([3])
