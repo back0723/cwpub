@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.9.4-ycarwith"
+    static let version = "1.9.5-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -240,51 +240,27 @@ function hitch(reason){
 }
 const debug=/[?&]debug=1/.test(location.search);let debugTick=0,received=0;
 let ws=null,fmt=null,shown=false,receiverReady=false,attempt=0,retryTimer=0,firstFrameTimer=0,lastKeyRequest=0,idleTimer=0,bytesIn=0;
-// JPEG compatibility rendering: one complete picture per packet, shown by swapping an <img>.
-// 老车机（Chromium 53 / Android 4.2）上把整帧画进 canvas、再让 canvas 放大到 1922 宽，每帧都
-// 要多做一次全屏软件 blit，实测只有 1~4 fps；直接把图换到 <img> 上，缩放交给浏览器合成器做，
-// CarMode 2.5 走的也是这条路。
-let jpegPainting=false,jpegQueued=null,jpegFrames=0,jpegUrlPrev=null,jpegStartAt=0,jpegTimeouts=0;
-// 兼容画面多宽由这台车机自己说了算：实测自己吃到多少帧，不够就请服务端降一档，富裕就升回去。
-// 刚接上的 10 秒里全是关键帧、伴音、首屏的抖动，这段不参与判断，否则一上来就连降四档、画面糊掉。
-let JPEG_WIDTHS=[1280,1120,1024,960],jpegAskIndex=0,jpegStamps=[],lastJpegReport=0,lastJpegAsk=0;
+// JPEG compatibility rendering, CarMode 2.5 的做法：一条 multipart/x-mixed-replace 连接，
+// <img src="/mjpeg"> 由浏览器自己的图像解码线程换图、缩放，页面脚本一帧都不碰。
+// 之前每帧在脚本里造 blob、换 src、再"实测 fps 降宽度"，1280 只跑到 1~4 fps，还被连降四档拉糊。
+let jpegFrames=0,jpegStartAt=0,jpegTimeouts=0;
 pic.onload=function(){
  received++;
  if(!jpegStartAt)jpegStartAt=performance.now();
  jpegFrames++;firstFrame();
- jpegStamps.push(performance.now());if(jpegStamps.length>200)jpegStamps.shift();
 };
-pic.onerror=function(){report('info','JPEG 图片解码失败')};
-setInterval(function(){
- if(!useJPEG||!shown||!jpegStartAt)return;
- const now=performance.now();
- if(now-jpegStartAt<10000)return;
- if(now-lastJpegAsk<4000)return;
- const recent=jpegStamps.filter(t=>now-t<5000);
- if(recent.length<6)return;
- const fps=recent.length/5;
- if(fps<7&&jpegAskIndex<JPEG_WIDTHS.length-1){
-  jpegAskIndex++;lastJpegAsk=now;jpegStamps=[];
-  const w=JPEG_WIDTHS[jpegAskIndex];
-  send({type:'jpegScale',width:w});
-  report('info','JPEG 实测 '+fps.toFixed(1)+' fps，兼容画面宽度降到 '+w);
- }else if(fps>=13&&jpegAskIndex>0){
-  jpegAskIndex--;lastJpegAsk=now;jpegStamps=[];
-  const w=JPEG_WIDTHS[jpegAskIndex];
-  send({type:'jpegScale',width:w});
-  report('info','JPEG 实测 '+fps.toFixed(1)+' fps，兼容画面宽度升回 '+w);
- }else if(now-lastJpegReport>20000){
-  lastJpegReport=now;
-  report('info','JPEG 实测 '+fps.toFixed(1)+' fps（'+((pic.naturalWidth||view.width)+'×'+(pic.naturalHeight||view.height))+'）');
- }
-},2000);
-function paintJPEG(bytes){
- if(bytes.length<2)return;
- // 最新一帧赢：上一张还没显示完就直接换掉，慢的时候自然降帧率，不排队积压。
- const url=URL.createObjectURL(new Blob([bytes.subarray(1)],{type:'image/jpeg'}));
- const old=jpegUrlPrev;jpegUrlPrev=url;
- pic.src=url;pic.hidden=false;
- if(old)setTimeout(function(){URL.revokeObjectURL(old)},2000);
+pic.onerror=function(){
+ // 服务端重启、会话重连时这条流会断：两秒后重开，别让画面停在最后一张上。
+ if(mjpegTimer)return;
+ report('info','MJPEG 画面流断开，2 秒后重开');
+ mjpegTimer=setTimeout(function(){mjpegTimer=0;openMJPEG()},2000);
+};
+// 跟不上的时候服务端只丢帧，分辨率不再被拉低——CarMode 也是这么活的。
+let mjpegTimer=0;
+function openMJPEG(){
+ if(mjpegTimer)return;
+ pic.hidden=false;
+ pic.src='/mjpeg?t='+Date.now();
 }
 // Clock sync with CarWithin (µs): offset = server − client, best of the lowest-RTT samples.
 let clockOffset=null,bestRtt=Infinity,bestAt=0,latencies=[];
@@ -475,7 +451,7 @@ function boot(){
  video.hidden=useWebCodecs||useJPEG;view.hidden=!useWebCodecs;if(!useJPEG)pic.hidden=true;
  window.carWithinPlayerBooted=true;
  if(typeof WebSocket!=='function'){setStatus('此浏览器缺少 WebSocket。请更新车机浏览器或 Android System WebView。','bad');return}
- if(useJPEG){connect();return}
+ if(useJPEG){openMJPEG();connect();return}
  if(!useWebCodecs&&!canMSE){setStatus('此浏览器缺少兼容播放器，正在切换 JPEG 模式…','bad');useJPEG=true;boot();return}
  connect();
 }
@@ -497,12 +473,12 @@ function connect(){
    // 会话已经在跑（页面马上会收到 format）就不弹"开始投屏"，否则给一个发起入口。
    window.setTimeout(function(){if(!fmt&&!shown)showStartCard()},1200);
    const decoder=useJPEG?'jpeg':useWebCodecs?'webcodecs':'mse';
-   send({type:'ready',decoder,viewer:viewerID,audioClock:!!AudioContextClass,ua:(navigator.userAgent||'').slice(0,200)});sendDisplay();requestAudio();if(useJPEG)askKey('JPEG 兼容观看端接入')
+   send({type:'ready',decoder,viewer:viewerID,audioClock:!!AudioContextClass,picture:useJPEG?'mjpeg':'',ua:(navigator.userAgent||'').slice(0,200)});sendDisplay();requestAudio();if(useJPEG)askKey('JPEG 兼容观看端接入')
   };
   if(useJPEG||useWebCodecs){ready();return}
   setStatus('已连接，正在启动播放器…');bootMSE(ready)
  };
- ws.onmessage=e=>{if(typeof e.data==='string')onText(JSON.parse(e.data));else{const u=new Uint8Array(e.data);if(u[0]===6){paintJPEG(u);return}if(u[0]===3){onAudioPacket(u);return}if(useJPEG)return;received++;useWebCodecs?onPacketWC(u):onBinaryMSE(u)}};
+ ws.onmessage=e=>{if(typeof e.data==='string')onText(JSON.parse(e.data));else{const u=new Uint8Array(e.data);if(u[0]===6){return}if(u[0]===3){onAudioPacket(u);return}if(useJPEG)return;received++;useWebCodecs?onPacketWC(u):onBinaryMSE(u)}};
  ws.onclose=()=>restart('连接已断开',false);ws.onerror=()=>{};
 }
 function onText(m){
@@ -523,7 +499,7 @@ function onText(m){
  if(m.page!==PAGE_VERSION){location.reload();return}
  hideStartCard();
  fmt=m;
- if(m.decoder==='jpeg'){setStatus(`CarPlay ${m.width}×${m.height} · JPEG 兼容（无需关键帧）`,'ok');armFirstFrameTimer(m);return}
+ if(m.decoder==='jpeg'){setStatus(`CarPlay ${m.width}×${m.height} · JPEG 兼容 · MJPEG`,'ok');armFirstFrameTimer(m);return}
  if(m.decoder==='webcodecs')configureWC(m);else formatMSE(m);
 }
 function ping(){if(ws&&ws.readyState===1)send({type:'ping',t0:nowUs()})}
