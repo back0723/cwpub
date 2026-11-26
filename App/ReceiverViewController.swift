@@ -2255,7 +2255,7 @@ extension ReceiverViewController {
 
     private func carLifeOutputSections() -> [SettingsSection] {
         [
-            SettingsSection("CarLife", footer: "车机与 iPhone 连同一个 Wi-Fi，打开车机上的 CarLife 后启动 CarPlay。使用 H.264，最高 1080p、30 FPS。", [
+                SettingsSection("CarLife", footer: "车机与 iPhone 连同一个 Wi-Fi，打开车机上的 CarLife 后启动 Carplay。使用 H.264，最高 1080p；帧率按上面画面设置（25/30/60），车机会自己请求。", [
                 .field("车机 IP 地址", carLifeAddressField, placeholder: "留空自动发现")
             ]),
             SettingsSection("连接状态", footer: "CarLife 传输画面和触控，声音走 iPhone 与车机的蓝牙。", [.note(carLifeStatus)])
