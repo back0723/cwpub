@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.9.0-ycarwith"
+    static let version = "1.9.2-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -209,7 +209,14 @@ const oldBrowser=chromeVer>0&&chromeVer<60;
 // path, and its MSE decoder routinely never produces a frame without a fresh IDR. JPEG needs
 // neither, so make it the default there; ?mse=1 still forces MSE for troubleshooting.
 const noWebCodecs=!canWebCodecs&&!/[?&]mse=1/.test(location.search);
-let useJPEG=/[?&]jpeg=1/.test(location.search)||oldBrowser||noWebCodecs;
+// 老车机（Chromium 53 / Crosswalk）同样有 MediaSource，H.264 走系统 MediaCodec 硬解：
+// 1922×858 全分辨率几乎不吃 CPU。而 JPEG 兼容画面要在 armv7 上软解 1280×540 的每帧 JPEG
+// 再 drawImage，1GB 内存的车机扛不住（15fps 也就勉强），所以默认先走 MSE 硬解；
+// 只有 MSE 真的不可用（!canMSE）或实测首帧超时（见 armFirstFrameTimer）才退 JPEG。
+const forcedJPEG=/[?&]jpeg=1/.test(location.search);
+const forcedMSE=/[?&]mse=1/.test(location.search);
+const rememberedJPEG=preference('sessionStorage','carwithin.jpeg')==='1';
+let useJPEG=forcedJPEG||!canMSE||(!forcedMSE&&rememberedJPEG);
 // ?mse=1 forces the compatibility decoder (troubleshooting).
 // Automatic mode remembers, for this browser session, that WebCodecs kept hitching here.
 let useWebCodecs=!useJPEG&&canWebCodecs&&!/[?&]mse=1/.test(location.search)&&preference('sessionStorage','carwithin.mse')!=='1';
@@ -233,7 +240,7 @@ function hitch(reason){
 const debug=/[?&]debug=1/.test(location.search);let debugTick=0,received=0;
 let ws=null,fmt=null,shown=false,receiverReady=false,attempt=0,retryTimer=0,firstFrameTimer=0,lastKeyRequest=0,idleTimer=0,bytesIn=0;
 // JPEG compatibility rendering: one complete picture per packet, drawn on the 2D canvas `view`.
-let jpegPainting=false,jpegQueued=null,jpegFrames=0,jpegCtx=null;
+let jpegPainting=false,jpegQueued=null,jpegFrames=0,jpegCtx=null,jpegTimeouts=0;
 function paintJPEG(bytes){
  if(bytes.length<2)return;
  if(jpegPainting){jpegQueued=bytes.slice();return}
@@ -460,7 +467,7 @@ function connect(){
    // 会话已经在跑（页面马上会收到 format）就不弹"开始投屏"，否则给一个发起入口。
    window.setTimeout(function(){if(!fmt&&!shown)showStartCard()},1200);
    const decoder=useJPEG?'jpeg':useWebCodecs?'webcodecs':'mse';
-   send({type:'ready',decoder,viewer:viewerID,audioClock:!!AudioContextClass,ua:(navigator.userAgent||'').slice(0,200)});sendDisplay();requestAudio()
+   send({type:'ready',decoder,viewer:viewerID,audioClock:!!AudioContextClass,ua:(navigator.userAgent||'').slice(0,200)});sendDisplay();requestAudio();if(useJPEG)askKey('JPEG 兼容观看端接入')
   };
   if(useJPEG||useWebCodecs){ready();return}
   setStatus('已连接，正在启动播放器…');bootMSE(ready)
@@ -492,7 +499,7 @@ function onText(m){
 function ping(){if(ws&&ws.readyState===1)send({type:'ping',t0:nowUs()})}
 setInterval(ping,1000);
 function firstFrame(){
- if(shown)return;shown=true;attempt=0;hold.hidden=true;clearTimeout(firstFrameTimer);hideStartCard();
+ if(shown)return;shown=true;attempt=0;jpegTimeouts=0;hold.hidden=true;clearTimeout(firstFrameTimer);hideStartCard();
  if(fmt)setStatus(`CarPlay ${fmt.width}×${fmt.height} · ${fmt.fps} · ${fmt.name} · ${connectionProtocol}`,'ok');
  // 按用户要求：出画后不再显示"分辨率 · 帧数 · 编码"那行，整条状态只留给报错用。
  statusEl.hidden=true;wake();
@@ -508,14 +515,20 @@ function tryMSE(m,reason){
 }
 function armFirstFrameTimer(m){
  clearTimeout(firstFrameTimer);
- const limit=m.name==='H.265'?5000:8000;
+ const limit=useJPEG?12000:(m.name==='H.265'?5000:8000);
  firstFrameTimer=setTimeout(()=>{
   if(shown)return;
-  if(useJPEG){report('error','JPEG 兼容画面首帧超时');restart('iPhone 未送出画面，正在重试',false);return}
+  if(useJPEG){
+   jpegTimeouts++;
+   report('error',`JPEG 兼容画面首帧超时（第 ${jpegTimeouts} 次）`);
+   askKey('JPEG 首帧超时');
+   if(jpegTimeouts<3){setStatus('已请求新关键帧，正在等待兼容画面…','bad');armFirstFrameTimer(m);return}
+   jpegTimeouts=0;restart('iPhone 未送出画面，正在重试',false);return}
   if(tryMSE(m,'低延迟首帧超时'))return;
   // No picture after 5–8 s: the browser is likely an old head unit that cannot start H.264
   // without a fresh IDR. Fall back to the iPhone-side JPEG stream, which needs no keyframe.
   report('info','首帧超时，切换到 JPEG 兼容画面（无需关键帧）');
+  preference('sessionStorage','carwithin.jpeg','1');
   useJPEG=true;useWebCodecs=false;teardown();boot();return
  },limit);
 }
