@@ -625,7 +625,9 @@ final class VideoOutputServer {
         // created late would never see a keyframe and could not decode anything (the exact
         // "missing keyframe" black screen). This mirrors CarMode's always-on BrowserJPEGEncoder.
         // Output is bounded to maximumFPS and only broadcast to viewers that asked for JPEG.
-        if parameters.isComplete {
+        // 兼容画面每帧都是一张完整图，不需要暖机：有 JPEG 观看端才解，没人看就完全不跑，
+        // 既省掉 iPhone 的解码 + JPEG 编码开销，也不会和本机预览抢同一个硬解通道。
+        if parameters.isComplete, hasJPEGViewers {
             jpegEncoder.configure(parameters: parameters)
             jpegEncoder.enqueue(sample, keyframe: keyframe)
         }
@@ -635,6 +637,9 @@ final class VideoOutputServer {
     private func resetStream(codec: VideoCodec, reason: String) {
         parameters = VideoParameterSets(codec: codec)
         format = nil; decoderRecord = nil; gop.removeAll(); gopBytes = 0
+        // 复用同一个 jpegEncoder 实例，参数集换了就必须把旧解码器扔掉：否则它会拿着上一场
+        // （别的分辨率）的格式描述一直报 -12903，兼容画面永远出不来。
+        jpegEncoder.invalidate()
         for client in clients.values where client.streamStarted || (client.mode == .raw && !client.waitingForIDR) {
             close(client, reason: nil)
         }
@@ -845,6 +850,7 @@ final class VideoOutputServer {
         clients.removeAll()
         primaryBrowser = nil; returningViewer = nil; nextBrowserOrder = 0
         parameters = VideoParameterSets(codec: .h264); format = nil; decoderRecord = nil; gop.removeAll(); gopBytes = 0
+        jpegEncoder.invalidate()
     }
 
     private func report(_ message: String) {
