@@ -877,7 +877,7 @@ final class VideoOutputServer {
     /// 2 = initialization segment, 1 = keyframe fragment, 0 = dependent fragment.
     /// WebCodecs viewers get the same first byte, then 8 bytes big-endian arrival time (µs),
     /// then the length-prefixed (AVCC/HVCC) sample.
-    private enum BrowserPacket: UInt8 { case delta = 0, keyframe = 1, initialization = 2, audio = 3, timedDelta = 4, timedKeyframe = 5, jpeg = 6, carModeVideo = 7 }
+    private enum BrowserPacket: UInt8 { case delta = 0, keyframe = 1, initialization = 2, audio = 3, timedDelta = 4, timedKeyframe = 5, jpeg = 6 }
 
     private static func appendTimestamp(_ timestamp: UInt64, to data: inout Data) {
         withUnsafeBytes(of: timestamp.bigEndian) { data.append(contentsOf: $0) }
@@ -921,7 +921,9 @@ final class VideoOutputServer {
                     sendCarModeState("ready", message: "已连接 CarPlay", to: client)
                     report("\(client.peer) 已开始显示 CarPlay（JMuxer 硬解）")
                 }
-                var packet = Data([BrowserPacket.carModeVideo.rawValue])
+                // 首字节必须是 1：CarMode 页面就是靠 bytes[0]===1 认 H.264 访问单元的，
+                // 之前错发成 7，页面直接忽略每一帧——这就是 1.9.8 的黑屏。
+                var packet = Data([1])
                 if keyframe, parameters.isComplete {
                     for unit in parameters.ordered { packet.append(contentsOf: [0, 0, 0, 1]); packet.append(unit) }
                 }
