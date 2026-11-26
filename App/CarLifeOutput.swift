@@ -918,6 +918,11 @@ private final class Session {
     /// 导航播报期间把音乐压到正常音量的一半（App 侧缩放 PCM，不依赖车机 setVolume）。
     /// 设置页「导航播报时音乐降低 50%」控制该开关，默认开启。
     static var navigationDuckingEnabled = true
+    /// 导航播报时音乐的压低幅度：0.25 = 约 −12 dB（听感上接近“只剩导航声”）。
+    /// 原来 0.5(=−6 dB) 太轻，短播报几乎察觉不到，实测用户“感觉不到降音”。
+    static let navigationDuckGain: Float = 0.25
+    /// 播报结束后维持压音的时间；播报之间往往只停 1–2 秒，尾巴太短会一顿一顿地回弹。
+    private static let navigationDuckTailNs: UInt64 = 3_000_000_000
     private var duckMusicUntil = DispatchTime(uptimeNanoseconds: 0)
     private var loggedDucking = false
 
@@ -942,10 +947,15 @@ private final class Session {
         // 导航播报时把音乐压到 50%：App 侧直接缩放 PCM16，车机无需支持 setVolume。
         let ducking = Self.navigationDuckingEnabled && nowNs < duckMusicUntil.uptimeNanoseconds
         guard var pcm = Self.pcm16(buffer) else { return }
-        if ducking { Self.scalePCM16(&pcm, 0.5) }
+        var peakBefore = 0
+        if ducking {
+            peakBefore = Self.peakPCM16(pcm)
+            Self.scalePCM16(&pcm, Self.navigationDuckGain)
+        }
         if ducking && !loggedDucking {
             loggedDucking = true
-            log?("CarLife 伴音：导航播报中，音乐音量压低到 50%")
+            // 打实测峰值：能直接看出压音到底有没有落到送车机的那份 PCM 上。
+            log?("CarLife 伴音：导航播报中，音乐压低到 25%（峰值 \(peakBefore) → \(Self.peakPCM16(pcm))）")
         }
         if !ducking { loggedDucking = false }
         let peak = Self.peakPCM16(pcm)
@@ -1104,7 +1114,7 @@ private final class Session {
             ttsSilentSince = nil
         }
         // 导航播报有声：接下来 1.5 秒把音乐压到 50%（连续播报每帧都会续期）。
-        duckMusicUntil = DispatchTime(uptimeNanoseconds: nowNs + 1_500_000_000)
+        duckMusicUntil = DispatchTime(uptimeNanoseconds: nowNs + Self.navigationDuckTailNs)
         guard let link = ttsLink else {
             if !loggedNoTTSChannel {
                 loggedNoTTSChannel = true
