@@ -57,7 +57,8 @@ final class CarPlayMediaSession {
     /// 只有 voice 流对应的 CarPlayAudio 会持有 NativeMicrophone，音乐流拿到会自己忽略。
     func feedVehicleMicrophone(_ pcm: Data) {
         for output in audio.values { output.feedVehicleMicrophone(pcm) }
-    }    private let audioEnabled: Bool
+    }
+    private let audioEnabled: Bool
     private let hevc: Bool
     private var eventCipher: ControlCipher?
     private var eventParser = RTSPParser(allowResponses: true)
