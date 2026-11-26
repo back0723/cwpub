@@ -242,6 +242,26 @@ const debug=/[?&]debug=1/.test(location.search);let debugTick=0,received=0;
 let ws=null,fmt=null,shown=false,receiverReady=false,attempt=0,retryTimer=0,firstFrameTimer=0,lastKeyRequest=0,idleTimer=0,bytesIn=0;
 // JPEG compatibility rendering: one complete picture per packet, drawn on the 2D canvas `view`.
 let jpegPainting=false,jpegQueued=null,jpegFrames=0,jpegCtx=null,jpegTimeouts=0;
+// 兼容画面多宽由这台车机自己说了算：它是 2015 年的 Android 4.2（CM8049），JPEG 全靠软解，
+// 每帧 drawImage 还要放大到 1922 宽。这里实测自己吃到多少帧，低于 10 fps 就请服务端降一档，
+// 比例由画面计划保证，不会拉变形——用数字调，不靠猜。
+let JPEG_WIDTHS=[1280,1152,1024,896,768],jpegAskIndex=0,jpegStamps=[],lastJpegReport=0;
+setInterval(function(){
+ if(!useJPEG||!shown)return;
+ const now=performance.now(),recent=jpegStamps.filter(t=>now-t<5000);
+ if(recent.length<3)return;
+ const fps=recent.length/5;
+ if(fps<10&&jpegAskIndex<JPEG_WIDTHS.length-1){
+  jpegAskIndex++;
+  const w=JPEG_WIDTHS[jpegAskIndex];
+  jpegStamps=[];lastJpegReport=now;
+  send({type:'jpegScale',width:w});
+  report('info','JPEG 实测 '+fps.toFixed(1)+' fps，兼容画面宽度降到 '+w);
+ }else if(fps>=10&&now-lastJpegReport>15000){
+  lastJpegReport=now;
+  report('info','JPEG 实测 '+fps.toFixed(1)+' fps（'+view.width+'×'+view.height+'）');
+ }
+},2000);
 function paintJPEG(bytes){
  if(bytes.length<2)return;
  if(jpegPainting){jpegQueued=bytes.slice();return}
@@ -252,6 +272,7 @@ function paintJPEG(bytes){
   if(view.width!==img.naturalWidth||view.height!==img.naturalHeight){view.width=img.naturalWidth;view.height=img.naturalHeight}
   if(!jpegCtx)jpegCtx=view.getContext('2d',{alpha:false});
   jpegCtx.drawImage(img,0,0);jpegFrames++;received++;firstFrame();
+  jpegStamps.push(performance.now());if(jpegStamps.length>200)jpegStamps.shift();
   jpegPainting=false;const next=jpegQueued;jpegQueued=null;if(next)paintJPEG(next);
  };
  img.onerror=function(){URL.revokeObjectURL(url);jpegPainting=false;const next=jpegQueued;jpegQueued=null;if(next)paintJPEG(next)};
