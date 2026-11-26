@@ -296,29 +296,10 @@ final class VideoOutputServer {
         let plain = NWParameters(tls: nil, tcp: tcp)
         plain.allowLocalEndpointReuse = true
         listener = makeListener(port: port, parameters: plain, secure: false, run: run)
-        guard let securePort else { return }
-        do {
-            let addresses = ReceiverConfiguration.localIPv4Addresses()
-            let tlsIdentity = try LocalTLSIdentity.load(addresses: addresses)
-            onLog?("\(tlsIdentity.created ? "已生成" : "已载入")浏览器 HTTPS 证书（\(addresses.joined(separator: ", "))）")
-            if !tlsIdentity.rootDER.isEmpty { onLog?("HTTPS 根证书 SHA-256：\(LocalTLSIdentity.fingerprint(tlsIdentity.rootDER))") }
-            let nativeIdentity = tlsIdentity.chain.isEmpty ? sec_identity_create(tlsIdentity.identity)
-                : sec_identity_create_with_certificates(tlsIdentity.identity, tlsIdentity.chain as CFArray)
-            guard let identity = nativeIdentity else { throw LocalTLSIdentity.TLSIdentityError.certificate("无法使用证书") }
-            let tls = NWProtocolTLS.Options()
-            sec_protocol_options_set_local_identity(tls.securityProtocolOptions, identity)
-            sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
-            let secureTCP = NWProtocolTCP.Options(); secureTCP.noDelay = true
-            let parameters = NWParameters(tls: tls, tcp: secureTCP)
-            parameters.allowLocalEndpointReuse = true
-            self.securePort = securePort
-            httpsRoot = tlsIdentity.rootDER
-            secureListener = makeListener(port: securePort, parameters: parameters, secure: true, run: run)
-        } catch { report("低延迟 HTTPS 接收页未开启：\(error.localizedDescription)") }
     }
 
     private func makeListener(port: UInt16, parameters: NWParameters, secure: Bool, run: UUID) -> NWListener? {
-        let name = hls == nil ? (secure ? "低延迟 HTTPS 接收页" : "浏览器接收页") : "AirPlay 播放服务"
+        let name = "AirPlay 播放服务"
         guard let endpointPort = NWEndpoint.Port(rawValue: port) else { report("\(name)端口无效"); return nil }
         do {
             let candidate = try NWListener(using: parameters, on: endpointPort)
@@ -408,100 +389,8 @@ final class VideoOutputServer {
             }
             return
         }
-        // 画面线整体换成 CarMode 2.5 的车机网页：它连的是 ws://host:port（路径就是 /），
-        // 所以升级请求必须在路由之前拦下来，否则会被当成要 HTML 的普通 GET。
-        if headers["upgrade"]?.lowercased() == "websocket" {
-            guard viewerCount < Self.maximumViewers else { reject(client, status: "503 Service Unavailable"); return }
-            upgradeWebSocket(client, headers: headers)
-            return
-        }
-        switch path {
-        case "/", "/index.html", "/cm", "/cm/":
-            sendHTTP(status: "200 OK", contentType: "text/html; charset=utf-8", body: CarModePage.html, to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-        case "/projection.js":
-            sendHTTP(status: "200 OK", contentType: "application/javascript; charset=utf-8", body: CarModePage.script, to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-        case "/projection.css":
-            sendHTTP(status: "200 OK", contentType: "text/css; charset=utf-8", body: CarModePage.styles, to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-        case "/pcm-playout.js":
-            sendHTTP(status: "200 OK", contentType: "application/javascript; charset=utf-8", body: CarModePage.playout, to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-        case "/jmuxer.min.js":
-            // 车机没有外网，JMuxer 由我们自己吐（base64 内嵌，避免工程再加资源文件）。
-            sendHTTP(status: "200 OK", contentType: "application/javascript; charset=utf-8", body: JMuxerAsset.data, to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-        case "/connection.json":
-            let body = Data("{\"generation\":\"\(generation.uuidString)\",\"port\":\(httpPort)}".utf8)
-            sendHTTP(status: "200 OK", contentType: "application/json; charset=utf-8", body: body, to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-        case "/legacy", "/y":
-            // 我们原来那套页面留个入口：CarMode 页面调不动时有退路。
-            sendHTTP(status: "200 OK", contentType: "text/html; charset=utf-8", body: BrowserReceiverPage.html, to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-        case "/https-setup", "/carwithin.cer", "/carwithin.crt", "/carwithin.mobileconfig":
-            serveHTTPSSetup(path, to: client)
-        case "/video.h264", "/video.h265", "/video":
-            guard viewerCount < Self.maximumViewers else { reject(client, status: "503 Service Unavailable"); return }
-            client.mode = .raw; client.waitingForIDR = true
-            let type = parameters.codec == .h264 ? "video/h264" : "video/h265"
-            sendRaw("HTTP/1.1 200 OK\r\nContent-Type: \(type)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", to: client)
-            report("\(client.peer) 已连接原始视频流（共 \(viewerCount) 台）")
-            replayGOP(to: client)
-        case "/mjpeg", "/mjpg", "/stream.jpg":
-            // CarMode 2.5 的做法：车机上的 <img src="/mjpeg"> 直接吃一条 multipart/x-mixed-replace
-            // 的 JPEG 流，解码、换图、缩放全在浏览器自己的图像解码线程里做，页面脚本一帧都不用碰。
-            guard viewerCount < Self.maximumViewers else { reject(client, status: "503 Service Unavailable"); return }
-            client.mode = .mjpeg
-            client.usesJPEG = true
-            client.waitingForIDR = false
-            client.streamStarted = true
-            client.browserReady = true
-            sendRaw("HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=\(Self.mjpegBoundary)\r\n"
-                    + "Cache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nConnection: close\r\n\r\n", to: client)
-            report("\(client.peer) 已接入 MJPEG 兼容画面（共 \(viewerCount) 台）")
-            jpegEncoder.configure(parameters: parameters)
-            // 兼容观看端一接入就要一个新关键帧：CarPlay 只在开流时发一次 IDR，晚了就没有完整的图可解。
-            onKeyframeRequest?("\(client.peer)：MJPEG 观看端接入")
-        case "/stream", "/oxp/v0":
-            guard viewerCount < Self.maximumViewers else { reject(client, status: "503 Service Unavailable"); return }
-            upgradeWebSocket(client, headers: headers)
-        default:
-            reject(client, status: "404 Not Found")
-        }
-    }
-
-    private func serveHTTPSSetup(_ path: String, to client: Client) {
-        guard let root = httpsRoot, let port = securePort else { reject(client, status: "404 Not Found"); return }
-        if root.isEmpty {
-            guard path == "/https-setup", let domain = HTTPSConfiguration.normalizedDomain(HTTPSConfiguration.domain) else { reject(client, status: "404 Not Found"); return }
-            sendHTTP(status: "200 OK", contentType: "text/html; charset=utf-8", body: Data("<meta charset=utf-8><h1>HTTPS 已配置证书</h1><p>使用公开 CA 证书时无需安装本地根证书。</p><a href=\"https://\(domain):\(port)/\">打开 HTTPS 接收页</a>".utf8), to: client.connection) { [weak self, weak client] in
-                guard let self, let client else { return }; self.close(client, reason: nil)
-            }
-            return
-        }
-        let content: (String, Data)
-        switch path {
-        case "/carwithin.cer", "/carwithin.crt": content = ("application/pkix-cert", root)
-        case "/carwithin.mobileconfig":
-            guard let profile = try? LocalTLSIdentity.profile(root: root) else {
-                reject(client, status: "500 Internal Server Error"); return
-            }
-            content = ("application/x-apple-aspen-config", profile)
-        default: content = ("text/html; charset=utf-8", LocalTLSIdentity.setupPage(root: root, port: port))
-        }
-        sendHTTP(status: "200 OK", contentType: content.0, body: content.1, to: client.connection,
-                 attachment: path == "/carwithin.crt" ? "CarWithin-HTTPS.crt" : nil) { [weak self, weak client] in
-            guard let self, let client else { return }; self.close(client, reason: nil)
-        }
+        // 车机网页投屏已整体移除：这个端口只服务 AirPlay 投送（HLS）。没有 HLS 会话时一律 404。
+        reject(client, status: "404 Not Found")
     }
 
     private func upgradeWebSocket(_ client: Client, headers: [String: String]) {
@@ -601,7 +490,7 @@ final class VideoOutputServer {
             client.streamStarted = false
             sendJSON(["type": "grant", "grant": generation.uuidString], to: client)
             sendCarModeState("idle", message: "已连接，点「开始投屏」", to: client)
-            onLog?("\(client.peer) 接入 CarMode 网页（\(CarModePage.version)）")
+            onLog?("\(client.peer) 接入网页客户端（已停用车机网页投屏）")
         case "viewport":
             guard client.carMode else { break }
             // CarMode 页面上报的是 player 的 CSS 尺寸 × devicePixelRatio，已经是真实像素。
