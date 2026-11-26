@@ -504,6 +504,10 @@ final class VideoOutputServer {
                 client.jpegFormatPending = true
                 sendJSON(["type": "status", "text": "已切换兼容画面，正在等待视频参数"], to: client)
             }
+        case "jpegScale":
+            // 车机按自己实测的帧率要求缩小兼容画面（软解吃不消就降一档）。服务端只改编码宽度。
+            guard let width = (object["width"] as? NSNumber)?.intValue, (640...1920).contains(width) else { break }
+            jpegEncoder.setMaximumWidth(CGFloat(width))
         case "keyframe":
             // Browser decoder recovery (stall, decode error, buffer trim). The receiver throttles.
             let reason = (object["reason"] as? String).map { String($0.prefix(60)) } ?? "浏览器请求"
