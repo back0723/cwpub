@@ -61,7 +61,9 @@ final class NativeReceiver {
     private var touchDownAt = 0.0
     private var lastTouchLog = 0.0
     /// 上一次发出的音乐状态，用来决定"播放/暂停"该明确发哪一个键。
-    private var assumedPlaying = true
+    // 是否认为音乐在播放：只用于「播放/暂停键」的内部分账，绝不作为通话后续播的判据
+    // （1.7 实测教训：默认 true 会让没在播的音乐在通话后自己响起来）。默认按“没在播”。
+    private var assumedPlaying = false
     private var displaySize: (width: Int, height: Int)?
     private var nightMode: Bool?
     /// 主线程：最近一次车机网页上报的真实视口（工具栏收起后的全屏尺寸）。
@@ -411,12 +413,12 @@ final class NativeReceiver {
         // 【车机麦开关】通话一建立就请求车机开麦（通道 1 0x10024）。不发这条命令，车机的
         // AudioRecord 根本不会启动 —— 这就是之前「有硬件麦却零入站」的真因。
         carLife.startVehicleMicrophone()
-        // 【续播判据改成「通话前真的有声」】以前只看 assumedPlaying，这个标志会被断开暂停、
-        // playPause 切换等各种路径写成 false，导致通话结束后不敢补播放键 → 用户看到「原来在放的
-        // 音乐，通话后不放了」。现在再加一条硬证据：最近 5 秒内收到过非静音音乐 PCM。
+        // 【不要凭空续播】只认一条硬证据：通话前 8 秒内真的收到过音乐流（音乐没暂停才会有流）。
+        // 以前这里用 assumedPlaying（默认 true，且会被 playPause/断开等路径写成 true），
+        // 于是「本来根本没在放音乐」的情况也被判成“通话前在播” → 挂断自动发播放键，
+        // 音乐自己响起来（1.7 实测：先车机响、停止后又回到手机响）。
         let sinceAudible = DispatchTime.now().uptimeNanoseconds - CarPlayAudio.lastAudibleAt.uptimeNanoseconds
-        let recentlyAudible = sinceAudible < 5_000_000_000
-        wasPlayingBeforeCall = assumedPlaying || recentlyAudible
+        wasPlayingBeforeCall = sinceAudible < 8_000_000_000
         guard wasPlayingBeforeCall, let media = activeMedia else {
             log("通话开始：车机静音（音乐本来没在播）")
             return
@@ -433,6 +435,9 @@ final class NativeReceiver {
         // 通话结束：让车机停止采麦，释放车机硬件麦。
         carLife.stopVehicleMicrophone()
         guard wasPlayingBeforeCall, let media = activeMedia else {
+            if !wasPlayingBeforeCall, activeMedia != nil {
+                log("通话结束：通话前音乐本来没在播，不发播放键（避免自己响起来）")
+            }
             wasPlayingBeforeCall = false
             return
         }
@@ -744,8 +749,11 @@ final class NativeReceiver {
                         self.queue.asyncAfter(deadline: .now() + 2.0, execute: work)
                         return
                     }
-                    // 有非通话音频流在跑，说明音乐确实在播放；用于通话前暂停、通话后续播的判断。
-                    if !CarPlayAudio.outputMuted { self.assumedPlaying = true }
+                    // 有非通话音频流在跑，且这一帧真的有声音，才算音乐在播放；
+                    // 用于通话前暂停、通话后续播的判断（静默帧不算，见 1.7 的误续播）。
+                    if !CarPlayAudio.outputMuted, CarPlayAudio.peakLevel(frame.buffer) > 0.02 {
+                        self.assumedPlaying = true
+                    }
                     guard carLifeOn, carLifeAudioOn, self.carLife.isReadyForAudio else {                        if !self.loggedCarLifeAudioBlocked {
                             self.loggedCarLifeAudioBlocked = true
                             self.log("CarLife 伴音：音频没送去车机（CarLife 模式=\(carLifeOn ? "开" : "关")，“随画面传输”=\(carLifeAudioOn ? "开" : "关")，车机未连上）")
