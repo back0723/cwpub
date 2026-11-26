@@ -675,7 +675,9 @@ final class VideoOutputServer {
         // 复用同一个 jpegEncoder 实例，参数集换了就必须把旧解码器扔掉：否则它会拿着上一场
         // （别的分辨率）的格式描述一直报 -12903，兼容画面永远出不来。
         jpegEncoder.invalidate()
-        for client in clients.values where client.streamStarted || (client.mode == .raw && !client.waitingForIDR) {
+        // MJPEG 观看端不吃分片、也不等关键帧，参数集换了它照样能看到下一张完整图，不要跟着一起断。
+        for client in clients.values where client.mode != .mjpeg
+            && (client.streamStarted || (client.mode == .raw && !client.waitingForIDR)) {
             close(client, reason: nil)
         }
         onLog?(reason)
@@ -778,7 +780,7 @@ final class VideoOutputServer {
             if client.usesAudioClock { Self.appendTimestamp(frame.arrivalUs, to: &packet) }
             packet.append(fragment)
             sendWebSocket(packet, opcode: 2, to: client)
-        case .request:
+        case .request, .mjpeg:
             break
         }
     }
