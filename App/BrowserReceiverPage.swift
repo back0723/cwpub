@@ -21,7 +21,7 @@ import Foundation
 enum BrowserReceiverPage {
     /// Sent with hello/format. An open page from an older app build reloads itself,
     /// because its in-page reconnect would otherwise keep running the old script.
-    static let version = "1.9.6-ycarwith"
+    static let version = "1.9.7-ycarwith"
     static let html = Data(#"""
 <!doctype html>
 <html lang="zh-CN">
@@ -346,16 +346,48 @@ function micDownsample(samples,from,to){
  }
  return buffer
 }
+function micCapability(){
+ const md=!!navigator.mediaDevices,gu=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia);
+ const legacy=!!(navigator.getUserMedia||navigator.webkitGetUserMedia);
+ const rtc=typeof RTCPeerConnection!=='undefined';
+ return 'mediaDevices='+md+' getUserMedia='+gu+' legacy='+legacy+' WebRTC='+rtc+' secure='+(self.isSecureContext===true)
+}
 function startMic(){
  if(micState.stream||micState.node)return;
  micState.wanted=true;
  if(!AudioContextClass){report('error','车机麦克风不可用：浏览器没有 Web Audio');return}
  const api=micAPI();
- if(!api){report('error','车机麦克风不可用：浏览器没有 getUserMedia');return}
+ if(!api){report('error','车机麦克风不可用：'+micCapability()+'（没有 getUserMedia）');return}
  const now=performance.now();
  if(now-micState.lastTry<1200)return;
  micState.lastTry=now;
- api({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true,channelCount:1},video:false}).then(stream=>{
+ // 老 Crosswalk 对约束写法敏感：先试最朴素的 audio:true，再试带约束的对象，最后试旧式 mandatory。
+ // 上一次实测第一档就报 NotSupportedError，说明要么构建里没有采集模块，要么收不了约束。
+ const plan=[
+  {label:'audio:true',c:{audio:true,video:false}},
+  {label:'audio约束',c:{audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false}},
+  {label:'mandatory',c:{audio:{mandatory:{},optional:[]},video:false}}
+ ];
+ const failure=[];
+ let step=0;
+ const attempt=()=>{
+  if(step>=plan.length){
+   const text=failure.join(' / ');
+   if(micState.reporting!==text){micState.reporting=text;report('error','车机麦克风被拒绝或不可用：'+text+'｜'+micCapability())}
+   return
+  }
+  const item=plan[step++];
+  api(item.c).then(stream=>{
+   micState.form=item.label;
+   attachMic(stream,item.label)
+  },err=>{
+   failure.push(item.label+'='+((err&&(err.name||err.message))||String(err)));
+   attempt()
+  })
+ };
+ attempt();
+}
+function attachMic(stream,form){
   micState.stream=stream;
   try{
    micState.context=new AudioContextClass();
@@ -373,12 +405,11 @@ function startMic(){
     if(micState.packets++===0)report('info','车机麦克风已开始上行（'+rate+' Hz → 16000 Hz）');
    };
    micState.source.connect(micState.node);micState.node.connect(micState.context.destination);
-   report('info','车机麦克风已开启（'+rate+' Hz → 16000 Hz 上行）');
-  }catch(e){report('error','车机麦克风初始化失败：'+e.message)}
- },err=>{
-  const name=(err&&(err.name||err.message))||String(err);
-  if(micState.reporting!==name){micState.reporting=name;report('error','车机麦克风被拒绝或不可用：'+name)}
- })
+   report('info','车机麦克风已开启（'+rate+' Hz → 16000 Hz 上行，'+form+'）');
+  }catch(e){
+   report('error','车机麦克风初始化失败：'+(e&&e.message||e));
+   if(micState.stream){try{micState.stream.getTracks().forEach(t=>t.stop())}catch(x){}micState.stream=null}
+  }
 }
 function stopMic(){
  micState.wanted=false;micState.packets=0;
