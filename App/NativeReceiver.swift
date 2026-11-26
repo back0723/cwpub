@@ -67,13 +67,9 @@ final class NativeReceiver {
     private var assumedPlaying = false
     private var displaySize: (width: Int, height: Int)?
     private var nightMode: Bool?
-    /// 主线程：最近一次车机网页上报的真实视口（工具栏收起后的全屏尺寸）。
-    private var headUnitScreen: BrowserDisplay?
-    /// 浏览器接收页是否在跑；它与 CarPlay 会话解耦，会话停止后页面仍在。
-    private var browserRunning = false
-    private var browserPort: UInt16?
     private var generation = UUID()
     private var airPlayIdentity: AirPlayCredentials?
+    /// 只服务「投送到 iPad」的 HLS 推流；车机网页投屏已整体移除。
     private let videoOutput = VideoOutputServer()
     private let carLife = CarLifeOutput()
     /// 车机在个人热点里的实时地址（CarLife 控制连接的对端），热点模式下当 CarPlay 会话目标。
@@ -88,14 +84,6 @@ final class NativeReceiver {
     private lazy var carLink = CarLinkRelay(queue: queue)
     var onCarLifeState: ((String) -> Void)?
     var onCarLinkState: ((String) -> Void)?
-    /// Main thread: the primary browser's screen changed.
-    var onBrowserDisplay: ((BrowserDisplay?, UUID?) -> Void)?
-    /// Main thread: the car page tapped "开始投屏"; the peer is the browser address.
-    var onBrowserStart: ((String) -> Void)?
-    /// Main thread: the car page asked to reconnect CarPlay at the current window size.
-    var onBrowserRefit: ((String) -> Void)?
-    /// Main thread: a browser keeps hitching.
-    var onBrowserStruggling: ((String, String) -> Void)?
     /// Main thread: the CarPlay car button was tapped (requestUI).
     var onCarUIRequested: (() -> Void)?
     // NetService must be published/stopped on a thread with a run loop (main).
@@ -106,92 +94,20 @@ final class NativeReceiver {
     var onControlDisconnected: (() -> Void)?
     var onVideo: ((Data, VideoCodec) -> Void)?
     var onAirPlayReady: ((UUID) -> Void)?
-    var onVideoOutputState: ((String) -> Void)?
-    /// 观看端浏览器标识（判断老车机浏览器，决定画面档位）。
-    var onBrowserUserAgent: ((String) -> Void)?
     var onFailure: (() -> Void)?
 
-    /// 浏览器接收页在会话启动前就常驻（CarMode 的做法，端口 8787 那一版的等效实现）。
-    func startBrowserOnly(_ configuration: ReceiverConfiguration) {
-        queue.async { [weak self] in
-            guard let self else { return }
-            // CarLife 模式与车机浏览器互斥：CarLife 模式不常驻浏览器页，避免两路推流互相挤带宽。
-            guard !configuration.carLifeEnabled, let port = configuration.videoOutputPort else { return }
-            // 已经在同一端口常驻就不用重启，否则车机页面会白屏重连一次。
-            if self.browserRunning, self.browserPort == port { return }
-            self.stopOnQueue(keepingBrowser: false)
-            self.wireBrowserOutput()
-            self.displaySize = (configuration.width, configuration.height)
-            self.startVideoOutput(port: port, securePort: configuration.secureVideoOutputPort,
-                                  width: configuration.width, height: configuration.height, fps: configuration.maxFPS,
-                                  performance: configuration.browserPerformance, showTouches: configuration.showTouches,
-                                  preferredViewer: nil, browserAudio: configuration.browserAudio, airPlayStreamID: nil)
-            self.log("浏览器接收页已常驻（端口 \(port)），可在车机页面上点“开始投屏”")
-        }
-    }
-    private func startVideoOutput(port: UInt16, securePort: UInt16?, width: Int, height: Int, fps: Int,
-                                  performance: BrowserPerformance, showTouches: Bool,
-                                  preferredViewer: UUID?, browserAudio: Bool, airPlayStreamID: UUID?) {
-        browserRunning = true
-        browserPort = port
-        videoOutput.start(port: port, securePort: securePort, width: width, height: height, fps: fps,
-                          performance: performance, showTouches: showTouches, preferredViewer: preferredViewer,
-                          browserAudio: browserAudio, airPlayStreamID: airPlayStreamID)
-    }
-    private func wireBrowserOutput() {
-        videoOutput.onLog = { [weak self] in self?.log($0) }
-        videoOutput.onAirPlayReady = { [weak self] id in
-            DispatchQueue.main.async { [weak self] in self?.onAirPlayReady?(id) }
-        }
-        videoOutput.onState = { [weak self] in self?.onVideoOutputState?($0) }
-        videoOutput.onViewerUserAgent = { [weak self] ua in
-            DispatchQueue.main.async { self?.onBrowserUserAgent?(ua) }
-        }
-        videoOutput.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
-        videoOutput.onTouches = { [weak self] source, points in self?.touches(source: source, points) }
-        videoOutput.onControl = { [weak self] in self?.press($0) }
-        videoOutput.onDisplay = { [weak self] display, viewerID in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let display, display.height >= 500,
-                   display.width * display.height > (self.headUnitScreen.map { $0.width * $0.height } ?? 0) {
-                    // 桌面上也打开接收页时，先接上的小窗口（比如 Edge 1358×610）不能抢走主屏；
-                    // 车机 1922×858 面积更大，等它上报后按它建立会话。
-                    self.headUnitScreen = display
-                }
-                self.onBrowserDisplay?(display, viewerID)
-            }
-        }
-        videoOutput.onStruggling = { [weak self] peer, reason in DispatchQueue.main.async { self?.onBrowserStruggling?(peer, reason) } }
-        videoOutput.onStartRequest = { [weak self] peer in
-            DispatchQueue.main.async { self?.onBrowserStart?(peer) }
-        }
-        videoOutput.onRefitRequest = { [weak self] peer in
-            DispatchQueue.main.async { self?.onBrowserRefit?(peer) }
-        }
-        // 浏览器模式的通话上行：CarLife 那条“车机麦”在纯浏览器模式下根本不存在（页面开的是
-        // 车机自带浏览器，不是我们的 APK）。这里把页面用 getUserMedia 采到的 16 kHz 单声道
-        // PCM16（WebSocket 类型 7）喂进同一条上行编码链路，对方才听得到。
-        videoOutput.onBrowserMicrophone = { [weak self] pcm in
-            guard let self else { return }
-            self.queue.async { self.activeMedia?.feedVehicleMicrophone(pcm) }
-        }
-    }
     func start(configuration: ReceiverConfiguration, identity: AccessoryIdentity, advertise: Bool = true,
                preferredViewer: UUID? = nil) {
         let listening = onListening
         queue.async { [weak self] in
             guard let self else { return }
-            // 浏览器接收页常驻（CarMode 的做法）：车机网页在会话启动前就能打开、上报尺寸、
-            // 并由页面上的"开始投屏"按钮发起会话，所以这里不能顺手把页面服务一起停掉。
-            self.stopOnQueue(keepingBrowser: self.browserRunning)
+            self.stopOnQueue()
             CarPlayAudio.outputMuted = false
             // 不再安装 interruption 静音观察者：旧逻辑来电时给 iPhone 发暂停键、挂断后靠
             // .ended（微信语音常不到）补播放键，实测「已暂停音乐」后一直等不到「已恢复」，
             // 音乐被卡在暂停态、挂断后车机哑。现在即使完整声明 telephony 让 iOS 把通话流推来，
             // 也在下游归为 .voice：对方声音送车机通道3、你的声音由麦克风上行回 iPhone；
             // 来电暂停/挂断恢复全由 iOS 系统自己管理，App 不插手。
-            self.wireBrowserOutput()
             self.displaySize = (configuration.width, configuration.height)
             if configuration.carLifeEnabled {
                 self.carLifeGOP = []; self.carLifeGOPBytes = 0; self.carLifeParamSets = []
@@ -218,13 +134,13 @@ final class NativeReceiver {
                 self.carLink.onKeyframe = { [weak self] in self?.requestKeyFrame(reason: "CarLink 中继") }
                 self.carLink.start(host: address, port: ReceiverConfiguration.carLinkRelayPort, fps: configuration.maxFPS)
             }
-            // CarLife 模式不启动车机浏览器推流：两种模式不同时开，省掉一路编码与发送。
-            if !configuration.carLifeEnabled, let port = configuration.videoOutputPort, !self.browserRunning || self.browserPort != port {
-                self.startVideoOutput(port: port, securePort: configuration.secureVideoOutputPort,
-                                      width: configuration.width, height: configuration.height, fps: configuration.maxFPS,
-                                      performance: configuration.browserPerformance, showTouches: configuration.showTouches,
-                                      preferredViewer: preferredViewer, browserAudio: configuration.browserAudio,
-                                      airPlayStreamID: configuration.airPlayStreamID)
+            // 只有「投送到 iPad」（AirPlay）才需要本地推流服务：车机网页投屏已整体移除。
+            if let streamID = configuration.airPlayStreamID, let port = configuration.videoOutputPort {
+                self.wireAirPlayOutput()
+                self.videoOutput.start(port: port, securePort: nil, width: configuration.width,
+                                       height: configuration.height, fps: configuration.maxFPS,
+                                       performance: .auto, showTouches: configuration.showTouches,
+                                       preferredViewer: nil, browserAudio: false, airPlayStreamID: streamID)
             }
             do { self.airPlayIdentity = advertise ? try AirPlayCredentials() : nil }
             catch { self.fail("AirPlay 身份创建失败：\(error.localizedDescription)"); return }
@@ -250,53 +166,16 @@ final class NativeReceiver {
                     self.log("已建立音频流：\(setups.joined(separator: "，"))")
                 }
             }
-            self.startSessionAfterHeadUnitScreen(configuration: configuration, identity: identity, onReady: listening)
+            self.listen(configuration: configuration, identity: identity, port: configuration.port, onReady: listening)
         }
     }
-    /// CarMode 的顺序：车机网页先接入并上报全屏尺寸，之后才建 CarPlay 会话。
-    /// iPhone 从 /info 里读配件屏幕尺寸，再决定要不要建 110 主屏视频流。我们之前用
-    /// 1922×320（宽高比 6:1 的占位值）开局，iPhone 只回 RECORD、从不发视频，车机就一直停在
-    /// "正在准备兼容画面"。这里等到网页上报 ≥500 高的真实尺寸，再用它建会话。
-    private func startSessionAfterHeadUnitScreen(configuration: ReceiverConfiguration, identity: AccessoryIdentity,
-                                                onReady: ((UInt16) -> Void)?) {
-        // CarLife 模式没有车机浏览器，直接建会话，不要白等网页上报尺寸（原先会空等最多 25 秒）。
-        guard configuration.videoOutputPort != nil, !configuration.carLifeEnabled else {
-            listen(configuration: configuration, identity: identity, port: configuration.port, onReady: onReady)
-            return
+    /// 只给「投送到 iPad」用的推流回调：车机网页投屏已经整体移除。
+    private func wireAirPlayOutput() {
+        videoOutput.onLog = { [weak self] in self?.log($0) }
+        videoOutput.onAirPlayReady = { [weak self] id in
+            DispatchQueue.main.async { [weak self] in self?.onAirPlayReady?(id) }
         }
-        let generation = self.generation
-        let deadline = Date().addingTimeInterval(25)
-        // 桌上电脑也开着接收页时，它往往先连上（Edge 1358×610）。给它几秒宽限，等车机
-        // 那种大屏（≥1600 宽、≥700 高）上报后再建会话，免得按小窗口的画面尺寸开局。
-        let grace = Date().addingTimeInterval(4)
-        self.log("等待车机网页上报全屏尺寸后再建立 CarPlay 会话（最多 25 秒；车机先打开接收页会更快）")
-        func attempt() {
-            guard self.generation == generation else { return }
-            let reported = self.headUnitScreen
-            if let reported, reported.height >= 500,
-               reported.width >= 1600 || Date() > grace {
-                var updated = configuration
-                updated.width = reported.width; updated.height = reported.height
-                self.queue.async { [weak self] in
-                    guard let self, self.generation == generation else { return }
-                    self.displaySize = (updated.width, updated.height)
-                    self.log("车机网页已上报 \(reported.width)×\(reported.height)，开始建立 CarPlay 会话")
-                    self.listen(configuration: updated, identity: identity, port: updated.port, onReady: onReady)
-                }
-                return
-            }
-            guard Date() < deadline else {
-                self.log("未等到车机网页上报尺寸，按 \(configuration.width)×\(configuration.height) 直接建会话")
-                self.queue.async { [weak self] in
-                    guard let self, self.generation == generation else { return }
-                    self.listen(configuration: configuration, identity: identity, port: configuration.port, onReady: onReady)
-                }
-                return
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { attempt() }
-        }
-        // headUnitScreen 只在主线程写入，轮询也放主线程，避免跨队列读取。
-        DispatchQueue.main.async { attempt() }
+        videoOutput.onKeyframeRequest = { [weak self] in self?.requestKeyFrame(reason: $0) }
     }
     private func listen(configuration: ReceiverConfiguration, identity: AccessoryIdentity, port: UInt16?, onReady: ((UInt16) -> Void)?) {
         let generation = self.generation
@@ -425,8 +304,6 @@ final class NativeReceiver {
         // 【车机麦开关】通话一建立就请求车机开麦（通道 1 0x10024）。不发这条命令，车机的
         // AudioRecord 根本不会启动 —— 这就是之前「有硬件麦却零入站」的真因。
         carLife.startVehicleMicrophone()
-        // 浏览器模式下没有 CarLife，车机麦要靠页面自己采：让页面在通话期间开麦克风。
-        videoOutput.setPageMicrophone(true)
         // 【不碰音乐】这里以前会给 iPhone 发暂停键、挂断再补播放键，靠"8 秒内听到过音频"猜
         // 通话前在不在放歌。这个猜测必然出错：刚暂停歌 5 秒就来的电话会被判成"在播"，
         // 挂断后我们替用户按了播放，本来没放的音乐自己响起来（两种模式都复现过）。
@@ -441,14 +318,12 @@ final class NativeReceiver {
         CarPlayAudio.outputMuted = false
         // 通话结束：让车机停止采麦，释放车机硬件麦。
         carLife.stopVehicleMicrophone()
-        videoOutput.setPageMicrophone(false)
-        // 不发播放键：避免挂断后音乐自己响起来。通话前在播就继续播（iOS 自己恢复），
+            // 不发播放键：避免挂断后音乐自己响起来。通话前在播就继续播（iOS 自己恢复），
         // 通话前没播就保持安静。
         log("通话结束：恢复声音输出（音乐保持通话前的状态，不自动播放）")
     }
 
-    func stop() { queue.async { [weak self] in self?.stopOnQueue(keepingBrowser: true) } }
-    /// 连同浏览器接收页一起关掉（关应用、切换输出方式时用）。
+    func stop() { queue.async { [weak self] in self?.stopOnQueue() } }
     func stopAll() { queue.async { [weak self] in self?.stopOnQueue() } }
     private var activeMedia: CarPlayMediaSession? { sessions.values.first(where: { $0.media != nil })?.media }
     /// All fingers currently held by `source` (normalized 0…1); an empty list releases them.
@@ -595,7 +470,7 @@ final class NativeReceiver {
     private static func containsRandomAccess(_ accessUnit: Data, codec: VideoCodec) -> Bool {
         (try? AnnexB.units(in: accessUnit))?.contains { codec.isRandomAccess($0) } ?? false
     }
-    private func stopOnQueue(keepingBrowser: Bool = false) {
+    private func stopOnQueue() {
         if let observer = callMuteObserver {
             NotificationCenter.default.removeObserver(observer); callMuteObserver = nil
         }
@@ -614,7 +489,7 @@ final class NativeReceiver {
             pauseSent = true
         }
         generation = UUID(); listener?.cancel(); listener = nil
-        if !keepingBrowser { videoOutput.stop(); browserRunning = false }
+        videoOutput.stop()
         carLife.stop()
         carLink.stop()
         #if DEBUG
@@ -705,14 +580,6 @@ final class NativeReceiver {
                 let media = CarPlayMediaSession(queue: queue, secret: secret, peerAddress: state.peerAddress,
                                                 audioEnabled: configuration.audioEnabled, hevc: configuration.videoCodec == .h265)
                 media.onLog = { [weak self] in self?.log($0) }
-                // 原来这里用 configuration.browserAudio 才挂音频回调：JPEG 兼容模式下这个标志
-                // 一旦是 false，iPhone 的音频连送都进不来。音频要不要给页面由页面自己点，
-                // 这里无条件接住，最多是没客户端要时白白丢掉。
-                media.onBrowserAudio = { [weak self] stream, buffer, stamp in
-                    // CarLife 模式不走车机浏览器，音频不必再做网页编码与发送。
-                    guard let self, !configuration.carLifeEnabled else { return }
-                    self.videoOutput.appendAudio(buffer, stream: stream, stamp: stamp)
-                }
                 // CarLife 车机端的音频分流：迷行 4.1.3 有音乐(通道3)与导航TTS(通道4)两套独立系统。
                 // 以前不分类型全塞通道3，导致导航被当音乐、格式交替重建 AudioTrack（冲突/卡顿/丢声）；
                 // 通话流用 setCallActive 暂停音乐/导航后独占通道3播对方声音，不与音乐混淆。
@@ -764,33 +631,15 @@ final class NativeReceiver {
                         break // 通话流已在开头 return，这里仅为 switch 穷尽，绝不送车机
                     }
                 }
-                // 【声音重复/音质差/停播后仍响 根因】音频送到车机有两条路：
-                //   路径A：onPCM → CarLife 通道3 → 迷行APK 的 AudioTrack（我们要的）；
-                //   路径B：CarPlayAudio 本机 AVAudioEngine 播放，路由是 CarAudio —— CarPlay 会话下
-                //          系统把 iPhone 本机音频又送回车机，于是同一份音乐播两遍：重复、相位叠加
-                //          导致音质差，本机还积压 1393ms 队列，停播后继续往外灌。
-                // 路径B 是否启用由 shouldForwardAudio（=browserAudioWanted）决定：返回 true 时
-                // CarPlayAudio 把 PCM 送网页后直接 return，不落本机播放。CarLife 音频已由路径A
-                // 送到车机，所以这里在 CarLife 伴音开启时必须恒返回 true，把路径B 彻底关掉。
-                // 声音页只剩两种输出：
-                // · 由 iPhone 输出（audioToBrowser=false）：PCM 一律本机播放，不再送网页或车机；
-                // · 随画面传输（Wi‑Fi）（audioToBrowser=true）：PCM 送浏览器播放；
-                //   没有浏览器在观看时回落到本机，避免选了这一项反而一点声音都没有。
-                // 「由 iPhone 输出」才允许本机播放；「随画面传输」连不上时保持静默，不回落。
+                // 路径B（本机 AVAudioEngine）只在「由 iPhone 输出」时启用；CarLife 伴音已由路径A
+                // 送车机，这里必须恒返回 true 把本机播放彻底关掉（原来网页那条路已整体移除）。
                 media.localAudioWanted = { configuration.audioLocal }
-                // 只有接收端真的连上才传音；连不上就本机播放。
-                // 曾经真的往接收端送过音、之后又断开时，把 iPhone 音乐按「暂停」，不退出会话。
+                // 只有车机真的连上才传音；断开了就把 iPhone 音乐按「暂停」，不退出会话。
                 var wasPlayingOnReceiver = false
                 media.browserAudioWanted = { [weak self] in
                     guard let self else { return true }
-                    let wanted: Bool
-                    if configuration.carLifeEnabled && configuration.carLifeAudio {
-                        wanted = self.carLife.isReadyForAudio
-                    } else if configuration.audioToBrowser {
-                        wanted = self.videoOutput.hasAudioViewers ?? false
-                    } else {
-                        wanted = false
-                    }
+                    let wanted = configuration.carLifeEnabled && configuration.carLifeAudio
+                        ? self.carLife.isReadyForAudio : false
                     if wanted {
                         wasPlayingOnReceiver = true
                     } else if wasPlayingOnReceiver {
@@ -809,8 +658,8 @@ final class NativeReceiver {
                     #endif
                     let keyframe = Self.containsRandomAccess(data, codec: codec)
                     if keyframe { self.keyframeArrived() }
-                    // CarLife 模式画面只走 CarLife 协议，不再往车机浏览器推流。
-                    if !configuration.carLifeEnabled { self.videoOutput.append(data, codec: codec) }
+                    // 只有「投送到 iPad」才往本地 HLS 服务喂帧；车机网页投屏已整体移除。
+                    if configuration.airPlayStreamID != nil { self.videoOutput.append(data, codec: codec) }
                     if configuration.carLifeEnabled {
                         // 只留最近一个 GOP：车机后连时靠它从关键帧起连续解码。
                         if keyframe {
