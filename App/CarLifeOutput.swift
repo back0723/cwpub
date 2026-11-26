@@ -107,6 +107,22 @@ final class CarLifeOutput {
         queue.async { [weak self] in self?.session?.setCallActive(active) }
     }
 
+    /// 【车机麦上行 —— 协议实证，反编译车机 CarLife 4.0.M1.3（com.baidu.carlifevehicle）】
+    /// 车机端的麦克风采集只在收到这几条命令后才启动：
+    /// · 通道 1 `0x10024`(65572) = MSG_CMD_MIC_RECORD_RECOG_START（语音识别场景开麦）
+    /// · 通道 1 `0x10022`(65570) = MSG_CMD_MIC_RECORD_WAKEUP_START（唤醒词场景开麦）
+    /// · 通道 1 `0x10023`(65571) = MSG_CMD_MIC_RECORD_END（关麦）
+    /// 开麦后车机 `new AudioRecord(MIC, 16000, 16bit, 单声道, 65536)`，把裸 PCM
+    /// 以 **通道 5 / 消息 `0x58001`(360449)** 回传（每包 1024 字节）。
+    /// 我们以前从不发开麦命令，所以「车机有硬件麦」也永远零入站 —— 这条命令才是开关。
+    var onVehicleMicrophonePCM: ((Data) -> Void)?
+    func startVehicleMicrophone() {
+        queue.async { [weak self] in self?.session?.startVehicleMicrophone() }
+    }
+    func stopVehicleMicrophone() {
+        queue.async { [weak self] in self?.session?.stopVehicleMicrophone() }
+    }
+
     /// 「导航播报时音乐降低 50%」开关：设置页写这里，真正做增益的是内部 Session。
     static var navigationDuckingEnabled: Bool {
         get { Session.navigationDuckingEnabled }
@@ -196,6 +212,7 @@ final class CarLifeOutput {
         session.onControl = { [weak self] in self?.onControl?($0) }
         session.onKeyframeRequest = { [weak self] in self?.onKeyframeRequest?("CarLife：\($0)") }
         session.onStartFrameNeeded = { [weak self] in self?.onStartFrameNeeded?() }
+        session.onVehicleMicPCM = { [weak self] in self?.onVehicleMicrophonePCM?($0) }
         return session
     }
 
@@ -667,6 +684,19 @@ private final class Session {
             log?("CarLife 通道 3 收到车机消息 id=\(wire.id)，长度 \(wire.payload.count)")
         }
         let message = try crypto.transform(wire, encrypt: false)
+        // 【车机麦】通道 5 / id 0x58001(360449) = 车机 AudioRecord 采到的裸 PCM
+        // （16 kHz 单声道 16 bit 小端，每包 1024 字节）。这是通话上行的唯一正确来源：
+        // 通话中系统不允许我们再录手机麦克风，只能用车机硬件麦。
+        if message.id == 360_449 {
+            vehicleMicPackets += 1
+            vehicleMicBytes += message.payload.count
+            if vehicleMicPackets <= 2 || vehicleMicPackets % 100 == 0 {
+                let head = message.payload.prefix(8).map { String(format: "%02X", $0) }.joined(separator: " ")
+                log?("车机麦：通道 \(message.channel) 收到 PCM #\(vehicleMicPackets)，\(message.payload.count) 字节，首字节 \(head)")
+            }
+            onVehicleMicPCM?(message.payload)
+            return
+        }
         guard profile != nil || message.id == 98305 else { return }
         func proto() throws -> CarLifeProto { try CarLifeProto(parsing: message.payload) }
         switch message.id {
@@ -980,6 +1010,25 @@ private final class Session {
         guard send(3, MusicCommand.data, pcm) else { return }
         if audioFramesSent == 0 { log?("CarLife 伴音：已开始向车机送音频（\(pcm.count) 字节/包）") }
         audioFramesSent += frames
+    }
+
+    /// 【车机麦】请求车机开麦 / 关麦（协议见 CarLifeOutput 上的说明）。
+    /// 开麦后车机会把 16 kHz 单声道 PCM16 从通道 5（id=360449）回传。
+    var onVehicleMicPCM: ((Data) -> Void)?
+    private var vehicleMicPackets = 0
+    private var vehicleMicBytes = 0
+    func startVehicleMicrophone() {
+        // 0x10024 = 65572 MSG_CMD_MIC_RECORD_RECOG_START
+        if send(1, 65_572) {
+            vehicleMicPackets = 0; vehicleMicBytes = 0
+            log?("车机麦：已请求车机开麦（通道1 0x10024），等待通道5回传 PCM")
+        } else {
+            log?("车机麦：开麦请求未发送（车机通道未就绪）")
+        }
+    }
+    func stopVehicleMicrophone() {
+        // 0x10023 = 65571 MSG_CMD_MIC_RECORD_END
+        if send(1, 65_571) { log?("车机麦：已请求车机关麦（通道1 0x10023），共收 \(vehicleMicPackets) 包 / \(vehicleMicBytes) 字节") }
     }
 
     /// 通话/微信语音占用时，暂停车机音乐(通道3)与导航(通道4)，结束后恢复。
