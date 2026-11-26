@@ -2,7 +2,7 @@
 
 [English](README.en.md) · **简体中文**
 
-[![Platform: iOS 16.0+](https://img.shields.io/badge/iOS-16.0%2B-blue)](#下载与安装) [![Status: released](https://img.shields.io/badge/status-released-brightgreen)](#快速开始) [![Release](https://img.shields.io/github/v/release/xmz28/CarWithin?label=release)](https://github.com/xmz28/CarWithin/releases/latest)
+[![Platform: iOS 16.0+](https://img.shields.io/badge/iOS-16.0%2B-blue)](#下载与安装) [![Status: released](https://img.shields.io/badge/status-released-brightgreen)](#快速开始) [![Release](https://img.shields.io/github/v/release/back0723/cwpub?label=release)](https://github.com/back0723/cwpub/releases/latest)
 
 CarWithin 在同一台 iPhone 上启动、显示和触控本机 CarPlay。你可以直接在 iPhone 上用导航、音乐等 CarPlay 应用，也可以把画面送到同一局域网的车机浏览器、平板、电脑或另一台手机。浏览器接收支持触控回传。
 
@@ -10,8 +10,8 @@ CarWithin 在同一台 iPhone 上启动、显示和触控本机 CarPlay。你可
 
 ## 下载与安装
 
-- [从 GitHub Releases 下载](https://github.com/xmz28/CarWithin/releases/latest)。当前版本为 **1.0.3（构建 15）**。
-- 下载 `CarWithin-1.0.3-unsigned.ipa`，用支持 IPA 的侧载工具按自己的签名方式签名并安装。按设备提示完成开发者信任或开启开发者模式。
+- [从 GitHub Releases 下载](https://github.com/back0723/cwpub/releases/latest)。版本以 Releases 页为准，当前为 **1.9（构建 10）**。
+- 下载 `CarWithin-*-unsigned.ipa`，用支持 IPA 的侧载工具按自己的签名方式签名并安装。按设备提示完成开发者信任或开启开发者模式。
 - 最低安装目标为 iOS/iPadOS 16.0，arm64；iOS 15 不支持安装。安装目标降低不等于所有旧系统均已实测，iOS 16.x 的本机 CarPlay、声音和后台行为仍需对应设备验证。实际可用性取决于设备、系统版本和签名方式。CarWithin 使用 iOS 私有接口，系统升级后可能需要重新验证。
 
 ## 快速开始
@@ -109,7 +109,7 @@ iPhone 加入仪表 Wi-Fi，选择同名 Wi-Fi 预设，在「当前输出」选
 - **网页打不开。** 确认 CarPlay 已启动、局域网接收页已打开、两台设备能互访，并用 App 显示的 HTTP 地址先试。能开 HTTP、HTTPS 提示证书问题时，按上面的步骤在接收设备上配置证书。
 - **连接成功但不出画面。** 试用 H.264、较低的分辨率或帧率，也可换浏览器。Redmi K30 5G 的 X 浏览器已实测能播放 HTTP 和 HTTPS。同机的 Chrome 109 曾遇到 H.265 解码失败。若切换网页后出现硬解码器资源不足，重启浏览器再试。
 - **网页有画面但没声音。** 检查是否已选「随画面传输（Wi-Fi）」并重新启动 CarPlay。若网页显示「开启声音」，点一下，再检查接收设备的音量。
-- **如何查版本或反馈问题。** 在「设置 → 关于」查看版本、检查更新或查看发布记录。反馈问题时请附 iPhone 和接收设备型号、系统、浏览器版本、HTTP/HTTPS、编码和分辨率，以及「设置 → 诊断与实验 → 日志」中相关片段。 [提交问题](https://github.com/xmz28/CarWithin/issues)
+- **如何查版本或反馈问题。** 在「设置 → 关于」查看版本、检查更新或查看发布记录。反馈问题时请附 iPhone 和接收设备型号、系统、浏览器版本、HTTP/HTTPS、编码和分辨率，以及「设置 → 诊断与实验 → 日志」中相关片段。 [提交问题](https://github.com/back0723/cwpub/issues)
 
 ## 工作原理与许可
 
