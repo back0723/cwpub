@@ -399,11 +399,17 @@ final class NativeReceiver {
     }
 
     private func beginCallOnQueue() {
+        guard !CarPlayAudio.outputMuted else { return }
         CarPlayAudio.outputMuted = true
         callMutedAt = Date()
         lastLoggedMuteSecond = 0
         loggedKeepAliveLoss = false
-        wasPlayingBeforeCall = assumedPlaying
+        // 【续播判据改成「通话前真的有声」】以前只看 assumedPlaying，这个标志会被断开暂停、
+        // playPause 切换等各种路径写成 false，导致通话结束后不敢补播放键 → 用户看到「原来在放的
+        // 音乐，通话后不放了」。现在再加一条硬证据：最近 5 秒内收到过非静音音乐 PCM。
+        let sinceAudible = DispatchTime.now().uptimeNanoseconds - CarPlayAudio.lastAudibleAt.uptimeNanoseconds
+        let recentlyAudible = sinceAudible < 5_000_000_000
+        wasPlayingBeforeCall = assumedPlaying || recentlyAudible
         guard wasPlayingBeforeCall, let media = activeMedia else {
             log("通话开始：车机静音（音乐本来没在播）")
             return
@@ -415,6 +421,7 @@ final class NativeReceiver {
     }
 
     private func endCallOnQueue() {
+        guard CarPlayAudio.outputMuted else { return }
         CarPlayAudio.outputMuted = false
         guard wasPlayingBeforeCall, let media = activeMedia else {
             wasPlayingBeforeCall = false
@@ -708,10 +715,22 @@ final class NativeReceiver {
                         // 所有音频与通话走 CarPlay：iPhone 已把通话音频路由进来，本机听筒不响，
                         // 必须把对方声音送车机通道3播出来（你的声音由麦克风上行回 iPhone）。
                         // 同时暂停车机音乐/导航，通话里不混入其它声音；2 秒没新语音帧再恢复。
+                        //
+                        // 【续播信号改由通话流本身触发】1.5 实测：通话/微信语音时
+                        // AVAudioSession 的中断通知一次都没到，`通话开始/通话结束` 两条日志全程没有，
+                        // 于是通话前没暂停、通话后也没补播放键 →「原来在放的音乐，打完电话不放了」。
+                        // 现在第一帧语音就等于“通话开始”，语音断流 2 秒等于“通话结束”。
+                        if !CarPlayAudio.outputMuted {
+                            self.queue.async { [weak self] in self?.beginCallOnQueue() }
+                        }
                         self.carLife.setCallActive(true)
                         self.carLife.appendVoiceAudio(frame.buffer)
                         self.voiceReleaseWork?.cancel()
-                        let work = DispatchWorkItem { [weak self] in self?.carLife.setCallActive(false) }
+                        let work = DispatchWorkItem { [weak self] in
+                            guard let self else { return }
+                            self.carLife.setCallActive(false)
+                            self.queue.async { self.endCallOnQueue() }
+                        }
                         self.voiceReleaseWork = work
                         self.queue.asyncAfter(deadline: .now() + 2.0, execute: work)
                         return
