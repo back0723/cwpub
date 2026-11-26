@@ -87,7 +87,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
     private var localStartupID: UUID?
     private let aspectRatioControl = ChoiceMenu(items: ["预设比例"] + ReceiverConfiguration.aspectRatios.map(\.title))
     private let resolutionControl = ChoiceMenu(items: ReceiverConfiguration.resolutions.map { "\($0.label)（\($0.width)×\($0.height)）" })
-    private let frameRateControl = ChoiceMenu(items: ["自动", "30 FPS", "60 FPS"])
+    private let frameRateControl = ChoiceMenu(items: ["自动", "25 FPS", "30 FPS", "60 FPS"])
     /// 0 = follow the head unit's screen, 1 = the fixed resolution.
     private let sizeModeControl = ChoiceMenu(items: ["跟随车机", "固定尺寸"])
     private let iconSizeControl = ChoiceMenu(items: ReceiverConfiguration.iconSizes.map { "\($0.title)（\($0.widthMM) mm）" })
@@ -616,7 +616,7 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         let defaults = UserDefaults.standard
         defaults.set(resolutionControl.selectedSegmentIndex, forKey: "displayResolutionIndex")
         defaults.set(aspectRatioControl.selectedTitle, forKey: "displayAspectRatio")
-        defaults.set([0, 30, 60][max(0, frameRateControl.selectedSegmentIndex)], forKey: "displayMaxFPS")
+        defaults.set([0, 25, 30, 60][max(0, frameRateControl.selectedSegmentIndex)], forKey: "displayMaxFPS")
         defaults.set(sizeModeControl.selectedSegmentIndex, forKey: "displaySizeMode")
         defaults.set(ReceiverConfiguration.iconSizes[max(0, iconSizeControl.selectedSegmentIndex)].widthMM, forKey: "widthPhysicalMM")
         defaults.set(autoRestartSwitch.isOn, forKey: "autoRestart")
@@ -649,8 +649,9 @@ final class ReceiverViewController: UIViewController, CLLocationManagerDelegate 
         }
         var fps: Int
         switch frameRateControl.selectedSegmentIndex {
-        case 1: fps = 30
-        case 2: fps = 60
+        case 1: fps = 25
+        case 2: fps = 30
+        case 3: fps = 60
         default: fps = 30
         }
         if lightLevel >= 1 { fps = min(fps, 30) }
@@ -1573,7 +1574,7 @@ extension ReceiverViewController {
             $0.title == defaults.string(forKey: "displayAspectRatio")
         }.map { $0 + 1 } ?? 0
         sizeModeControl.selectedSegmentIndex = defaults.object(forKey: "displaySizeMode") as? Int ?? 0
-        frameRateControl.selectedSegmentIndex = [0: 0, 30: 1, 60: 2][defaults.object(forKey: "displayMaxFPS") as? Int ?? 30] ?? 1
+        frameRateControl.selectedSegmentIndex = [0: 0, 25: 1, 30: 2, 60: 3][defaults.object(forKey: "displayMaxFPS") as? Int ?? 30] ?? 2
         let savedWidth = defaults.object(forKey: "widthPhysicalMM") as? Int ?? CarPlayInfo.defaultWidthPhysicalMM
         iconSizeControl.selectedSegmentIndex = ReceiverConfiguration.iconSizes.firstIndex { $0.widthMM == savedWidth } ?? 1
         autoRestartSwitch.isOn = defaults.object(forKey: "autoRestart") as? Bool ?? false
@@ -1911,7 +1912,7 @@ extension ReceiverViewController {
                     : "选择比例后按分辨率档位计算尺寸，短边至少 320 像素，实际值见下方。2K/4K 会增加发热和带宽。")
                     + (!followsCarScreen ? "\n此输出受 1920×1080 限制，较长的竖屏比例以实际尺寸为准。" : "")
                     + "\n下次启动：\(plan.width)×\(plan.height) · \(plan.fps) FPS · \(plan.codec.displayName)", size),
-                SettingsSection(footer: "帧率可真正选 30 或 60 FPS，默认 30（「自动」也走 30）。60 FPS 需要车机硬解和 Wi-Fi 都跟得上；跟不上会自动降档重启。", [
+                SettingsSection(footer: "帧率可选 25 / 30 / 60 FPS，默认 30（「自动」也走 30）。25 更省带宽，60 需要车机硬解和 Wi-Fi 都跟得上；跟不上会自动降档重启。", [
                     .control("帧率", icon: ("gauge.with.dots.needle.67percent", .systemGreen), frameRateControl)
                 ]),
                 SettingsSection(footer: "画面持续卡顿时，自动以更轻的画面重启 CarPlay（先降到 30 FPS，再降到 720P），每次连接最多两次。", [
